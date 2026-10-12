@@ -5,6 +5,9 @@ import { APPROVED_MODEL, APPROVED_PROMPT_SHA256, effectiveModel } from "./policy
 import { DuckDbSpamCache } from "./spam-cache";
 import { Bot } from "grammy";
 import { registerBotHandlers } from "./bot";
+import { registerIdentityScreening, probabilityRequest, AVATAR_COMPARE_PROMPT, AVATAR_SPAM_PROMPT, IDENTITY_TEXT_PROMPT } from "./identity";
+import { AdminCache } from "./admin-cache";
+import { SenderProfileCache } from "./profile";
 import { loadConfig } from "./config";
 import { closeDuck } from "./duck";
 import { JevSpamClassifier } from "./spam";
@@ -66,6 +69,29 @@ const imageLoader = async (fileId: string): Promise<string> => {
 };
 
 registerBotHandlers(bot, { classifier, visionClassifier, shadowClassifier, trainingCapture, deletionAudit, model: config.openRouterModel, visionModel: config.zaiModel, stats, spamCache, imageLoader, spamThreshold: config.spamThreshold });
+
+// Identity screening: joins, renames, admin/support impersonation, promo profiles, spam avatars.
+// Text evidence -> Jev router (OpenRouter); image evidence -> GLM vision (Z.AI).
+if (process.env.IDENTITY_SCREENING !== "false") {
+  const admins = new AdminCache();
+  const profiles = new SenderProfileCache();
+  const probability = (system: string, user: string, image?: string) => probabilityRequest(
+    fetch, config.zaiUrl, config.zaiApiKey, { model: config.zaiModel, system, user, ...(image ? { image } : {}) });
+  registerIdentityScreening(bot, {
+    admins,
+    profiles,
+    imageLoader,
+    threshold: config.spamThreshold,
+    models: {
+      promoProbability: (evidence) => probability(IDENTITY_TEXT_PROMPT, evidence),
+      avatarSpamProbability: (dataUrl) => probability(AVATAR_SPAM_PROMPT, "Assess this profile photo.", dataUrl),
+      avatarImitationProbability: (adminDataUrl, memberDataUrl) => probability(
+        AVATAR_COMPARE_PROMPT, "Which image is the admin's? Does the member impersonate them?", adminDataUrl) ?? probability(
+        AVATAR_COMPARE_PROMPT, "Second call", memberDataUrl),
+    },
+    logger: console,
+  });
+}
 
 let polling: Promise<void> = Promise.resolve();
 let shutdownPromise: Promise<void> | undefined;

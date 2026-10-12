@@ -93,6 +93,16 @@ docker build -t jev-antispam-bot .
 docker run --rm --env-file .env jev-antispam-bot
 ```
 
+## Identity screening (joins, renames, impersonation)
+
+Enabled by default (`IDENTITY_SCREENING=false` to disable). On every join — and again when a member **renames** — the bot screens the identity:
+
+1. **Deterministic pre-filter** (free, no model): name/@username checked against admin names (unicode-normalized similarity) and impersonation keywords (`support`, `admin`, `helpdesk`, `поддержка`, … with word boundaries).
+2. **Model evidence**: profile bio/personal channel → Jev text router; profile photo → GLM vision ("is this photo itself an ad?"); if impersonation is plausible (keyword or name match), the member's photo is compared with the admin's photo (two images in one GLM request).
+3. **Ban rule**: an action only happens when a model confirms (`probability ≥ SPAM_THRESHOLD`) **and** a deterministic signal corroborates it (keyword, ≥0.9 name similarity, or the avatar itself being an ad). A model outage is fail-open — no model, no ban.
+
+Every ban is reported to the audit chat with reasons and scores; failed bans are logged. Renames are detected by comparing names on each message (Telegram has no rename event); members already present before startup are not retroactively screened.
+
 ## Statistics and audit outbox (embedded DuckDB)
 
 Statistics, the verdict cache and the deletion-audit outbox all live in one embedded DuckDB file (`DUCKDB_PATH`, default `./data/antispam.duckdb`). DuckDB is a **single-writer** embedded database: run exactly one bot instance per file. The bot applies [`migrations/duck/*.sql`](migrations/duck) automatically on first use; the migration is idempotent, so no separate migration command is required. After the bot receives a normal update, a `stats_storage_ready` log confirms that storage is available. You can inspect the totals with:

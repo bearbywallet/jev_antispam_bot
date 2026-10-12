@@ -1,0 +1,41 @@
+{
+  "nextId": 11,
+  "tasks": [
+    {
+      "id": "8",
+      "subject": "Create identity.ts: name analysis + screening client + decision rules",
+      "description": "src/identity.ts: normalizeName/nameSimilarity/impersonationKeyword (deterministic), NameStore (rename detection), probability client helpers (parseProbability, probabilityRequest with image support), screenIdentity combiner (promo text via Jev, avatar spam via GLM, avatar impersonation vs admin avatar), ban decision rules. Extend AdminCache with administrators(api, chatId) cached list.",
+      "status": "completed",
+      "activeForm": "Writing identity screening core",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1791834765713,
+      "updatedAt": 1791835208738
+    },
+    {
+      "id": "9",
+      "subject": "Wire join/rename screening into bot + index.ts",
+      "description": "registerIdentityScreening(bot, options) in identity.ts: chat_member join handler (left/kicked → member/restricted), message:new_chat_members for basic groups, rename detection on messages via NameStore (changed → re-screen fire-and-forget). Evidence: profile text via SenderProfileCache, avatar via getUserProfilePhotos+imageLoader, admin names via AdminCache.administrators, admin avatar cache. Action: banChatMember + best-effort service message delete + sendAuditReport to AUDIT_CHAT_ID. Wire in index.ts behind IDENTITY_SCREENING env (default on).",
+      "status": "completed",
+      "activeForm": "Wiring join/rename screening",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1791834765714,
+      "updatedAt": 1791835590486
+    },
+    {
+      "id": "10",
+      "subject": "Tests, docs, typecheck, commit",
+      "description": "src/identity.test.ts: pure tests (normalize, similarity, keywords, NameStore, parseProbability), client tests with fake fetch (think-stripping, malformed JSON), decision table, glue test with grammy fake Api (join with promo bio → ban + audit; support-nick without corroboration → no ban; admin join → skip; rename triggers screening; avatar spam → ban). Then tsc + full bun test + README/.env.example + commit.",
+      "status": "in_progress",
+      "activeForm": "Testing identity screening",
+      "metadata": {},
+      "blocks": [],
+      "blockedBy": [],
+      "createdAt": 1791834765714,
+      "updatedAt": 1791835590487
+    }
+  ]
+}
