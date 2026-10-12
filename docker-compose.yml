@@ -1,0 +1,14 @@
+# One bot instance per DuckDB file (single writer).
+services:
+  bot:
+    build: .
+    image: jev-antispam:latest
+    container_name: jev-antispam
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      # DuckDB database persists here across restarts/rebuilds.
+      - jev-data:/app/data
+
+volumes:
+  jev-data:
