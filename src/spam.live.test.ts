@@ -18,14 +18,14 @@ import { profileBaitControls, profileBaitMessages } from "./fixtures/profile-bai
 import { inviteAmbiguousBare, inviteCampaigns, inviteControls, inviteAmbiguousCaptions, inviteRepeats, inviteNormalizedCases } from "./fixtures/invite-funnel";
 import { testimonialControls, testimonialPromotions } from "./fixtures/testimonial-promotion";
 
-const apiKey = process.env.TYPESAFE_API_KEY;
-const liveTest = process.env.RUN_LIVE_JEV === "1" && apiKey ? test : test.skip;
+const apiKey = process.env.ZAI_API_KEY;
+const liveTest = process.env.RUN_LIVE_ZAI === "1" && apiKey ? test : test.skip;
 
 describe("live Jev moderation fixtures", () => {
   const classifier = new JevSpamClassifier(apiKey ?? "unused", {
-    model: "jev-1.13.0",
+    model: "glm-4.6v",
     threshold: 0.9,
-    timeoutMs: 10_000,
+    timeoutMs: 25_000,
   });
 
   for (const fixture of inviteAmbiguousCaptions) {

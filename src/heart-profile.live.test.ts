@@ -2,13 +2,13 @@ import { expect, test } from "bun:test";
 import { JevSpamClassifier, CONTEXT_LINK_THRESHOLD, type ModerationMessage } from "./spam";
 import { heartFixtures } from "./fixtures/heart-profile";
 
-const key = process.env.TYPESAFE_API_KEY;
-const liveTest = process.env.RUN_LIVE_JEV === "1" && key ? test : test.skip;
+const key = process.env.ZAI_API_KEY;
+const liveTest = process.env.RUN_LIVE_ZAI === "1" && key ? test : test.skip;
 for (const fixture of heartFixtures) {
   liveTest("synthetic heart boundary: " + fixture.id, async () => {
     const exchanges: { request: { state: { message: unknown }; questions: Record<string, unknown> }; response: { answers: Record<string, unknown> } }[] = [];
     const classifier = new JevSpamClassifier(key!, {
-      model: "jev-1.13.0", threshold: 0.81, timeoutMs: 10_000,
+      model: "glm-4.6v", threshold: 0.81, timeoutMs: 25_000,
       fetch: async (url, init) => {
         const request = JSON.parse(String(init?.body));
         const response = await fetch(url, init);

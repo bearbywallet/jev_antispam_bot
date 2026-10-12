@@ -1,8 +1,6 @@
-import { readFile } from "node:fs/promises";
-import pg from "pg";
+import { fileURLToPath } from "node:url";
 
-const { Pool } = pg;
-const MIGRATION_URL = new URL("../migrations/001_chat_stats.sql", import.meta.url);
+import { duckMigrate, duckQuery } from "./duck";
 const DEDUPE_RETENTION_DAYS = 90;
 
 export type ChatId = number | bigint | string;
@@ -94,172 +92,124 @@ type BufferOptions = {
   autoStart?: boolean;
 };
 
-const BATCH_SQL = `
-WITH supplied_chats AS (
-  SELECT
-    "chatId"::BIGINT AS chat_id,
-    "firstSeenAt" AS first_seen_at,
-    "lastSeenAt" AS last_seen_at,
-    "chatType" AS chat_type,
-    "membershipActive" AS membership_active
-  FROM jsonb_to_recordset($1::jsonb) AS x(
-    "chatId" TEXT,
-    "firstSeenAt" TIMESTAMPTZ,
-    "lastSeenAt" TIMESTAMPTZ,
-    "chatType" TEXT,
-    "membershipActive" BOOLEAN
-  )
-),
-deletion_rows AS (
-  SELECT "chatId"::BIGINT AS chat_id, "messageId"::BIGINT AS message_id, "deletedAt" AS deleted_at, COALESCE(source, 'jev') AS source
-  FROM jsonb_to_recordset($2::jsonb) AS x(
-    "chatId" TEXT,
-    "messageId" TEXT,
-    "deletedAt" TIMESTAMPTZ,
-    source TEXT
-  )
-),
-attempt_rows AS (
-  SELECT
-    "chatId"::BIGINT AS chat_id,
-    "messageId"::BIGINT AS message_id,
-    "updateId"::BIGINT AS update_id,
-    "attemptedAt" AS attempted_at
-  FROM jsonb_to_recordset($3::jsonb) AS x(
-    "chatId" TEXT,
-    "messageId" TEXT,
-    "updateId" TEXT,
-    "attemptedAt" TIMESTAMPTZ
-  )
-),
-event_chats AS (
-  SELECT
-    chat_id,
-    MIN(seen_at) AS first_seen_at,
-    MAX(seen_at) AS last_seen_at,
-    NULL::TEXT AS chat_type,
-    NULL::BOOLEAN AS membership_active
-  FROM (
-    SELECT chat_id, deleted_at AS seen_at FROM deletion_rows
-    UNION ALL
-    SELECT chat_id, attempted_at AS seen_at FROM attempt_rows
-  ) AS events
-  WHERE NOT EXISTS (SELECT 1 FROM supplied_chats WHERE supplied_chats.chat_id = events.chat_id)
-  GROUP BY chat_id
-),
-inserted_deletions AS (
-  INSERT INTO deletion_dedup (chat_id, message_id, deleted_at, source)
-  SELECT deletion_rows.chat_id, deletion_rows.message_id, deletion_rows.deleted_at, deletion_rows.source
-  FROM deletion_rows
-  ON CONFLICT (chat_id, message_id) DO NOTHING
-  RETURNING chat_id, source
-),
-deletion_counts AS (
-  SELECT chat_id, COUNT(*)::BIGINT AS increment, COUNT(*) FILTER (WHERE source = 'cache')::BIGINT AS cache_increment
-  FROM inserted_deletions
-  GROUP BY chat_id
-),
-inserted_attempts AS (
-  INSERT INTO classification_attempt_dedup (update_id, chat_id, message_id, attempted_at)
-  SELECT attempt_rows.update_id, attempt_rows.chat_id, attempt_rows.message_id, attempt_rows.attempted_at
-  FROM attempt_rows
-  ON CONFLICT (update_id) DO NOTHING
-  RETURNING chat_id
-),
-attempt_counts AS (
-  SELECT chat_id, COUNT(*)::BIGINT AS increment
-  FROM inserted_attempts
-  GROUP BY chat_id
-),
-upserted_chats AS (
-  INSERT INTO known_chats (
-    chat_id,
-    first_seen_at,
-    last_seen_at,
-    chat_type,
-    membership_active,
-    successful_deletions,
-    cache_deletions,
-    processed_messages
-  )
-  SELECT
-    chats.chat_id,
-    chats.first_seen_at,
-    chats.last_seen_at,
-    chats.chat_type,
-    chats.membership_active,
-    COALESCE(deletion_counts.increment, 0),
-    COALESCE(deletion_counts.cache_increment, 0),
-    COALESCE(attempt_counts.increment, 0)
-  FROM (
-    SELECT * FROM supplied_chats
-    UNION ALL
-    SELECT * FROM event_chats
-  ) AS chats
-  LEFT JOIN deletion_counts USING (chat_id)
-  LEFT JOIN attempt_counts USING (chat_id)
-  ON CONFLICT (chat_id) DO UPDATE SET
-    first_seen_at = LEAST(known_chats.first_seen_at, EXCLUDED.first_seen_at),
-    last_seen_at = GREATEST(known_chats.last_seen_at, EXCLUDED.last_seen_at),
-    chat_type = COALESCE(EXCLUDED.chat_type, known_chats.chat_type),
-    membership_active = COALESCE(EXCLUDED.membership_active, known_chats.membership_active),
-    successful_deletions = known_chats.successful_deletions + EXCLUDED.successful_deletions,
-    cache_deletions = known_chats.cache_deletions + EXCLUDED.cache_deletions,
-    processed_messages = known_chats.processed_messages + EXCLUDED.processed_messages,
-    updated_at = NOW()
-  RETURNING chat_id
-),
-pruned_deletions AS (
-  DELETE FROM deletion_dedup
-  WHERE deleted_at < NOW() - ($4::INTEGER * INTERVAL '1 day')
-  RETURNING 1
-)
-DELETE FROM classification_attempt_dedup
-WHERE attempted_at < NOW() - ($4::INTEGER * INTERVAL '1 day');
-`;
+const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/duck", import.meta.url));
 
-export class PostgresStatsStore implements StatsStore {
-  private readonly pool: pg.Pool;
+type ChatUpsert = {
+  chatId: string;
+  firstSeenAt: string;
+  lastSeenAt: string;
+  chatType: string | null;
+  membershipActive: boolean | null;
+  deletions: number;
+  cache: number;
+  attempts: number;
+};
+
+export class DuckDbStatsStore implements StatsStore {
   private migration?: Promise<void>;
-
-  constructor(databaseUrl: string, timeoutMs = 2_000) {
-    this.pool = new Pool({
-      connectionString: databaseUrl,
-      max: 1,
-      connectionTimeoutMillis: timeoutMs,
-      idleTimeoutMillis: 10_000,
-      query_timeout: timeoutMs,
-      statement_timeout: Math.max(1, timeoutMs - 100),
-      application_name: "jev_antispam_bot_stats",
-    });
-    this.pool.on("error", () => undefined);
-  }
 
   async writeBatch(batch: StatsBatch): Promise<void> {
     await this.ensureMigrated();
-    await this.pool.query(BATCH_SQL, [
-      JSON.stringify(batch.chats),
-      JSON.stringify(batch.deletions),
-      JSON.stringify(batch.classificationAttempts),
-      DEDUPE_RETENTION_DAYS,
-    ]);
+    const chats = new Map<string, ChatUpsert>();
+    const ensureChat = (
+      chatId: string,
+      seenAt: string,
+      chatType: string | null,
+      membershipActive: boolean | null,
+    ): ChatUpsert => {
+      let chat = chats.get(chatId);
+      if (!chat) {
+        chat = { chatId, firstSeenAt: seenAt, lastSeenAt: seenAt, chatType, membershipActive, deletions: 0, cache: 0, attempts: 0 };
+        chats.set(chatId, chat);
+        return chat;
+      }
+      if (seenAt < chat.firstSeenAt) chat.firstSeenAt = seenAt;
+      if (seenAt > chat.lastSeenAt) chat.lastSeenAt = seenAt;
+      if (chatType !== null) chat.chatType = chatType;
+      if (membershipActive !== null) chat.membershipActive = membershipActive;
+      return chat;
+    };
+
+    for (const chat of batch.chats) {
+      ensureChat(chat.chatId, chat.firstSeenAt, chat.chatType, chat.membershipActive);
+      if (chat.lastSeenAt > chat.firstSeenAt) ensureChat(chat.chatId, chat.lastSeenAt, null, null);
+    }
+
+    for (const deletion of batch.deletions) {
+      const chat = ensureChat(deletion.chatId, deletion.deletedAt, null, null);
+      const inserted = await duckQuery(
+        `INSERT INTO deletion_dedup (chat_id, message_id, deleted_at, source)
+         VALUES ($1::BIGINT, $2::BIGINT, $3::TIMESTAMPTZ, COALESCE($4::TEXT, 'jev'))
+         ON CONFLICT (chat_id, message_id) DO NOTHING
+         RETURNING source`,
+        [deletion.chatId, deletion.messageId, deletion.deletedAt, deletion.source ?? null],
+      );
+      if (inserted.rows.length > 0 && inserted.rows[0]) {
+        chat.deletions += 1;
+        if (inserted.rows[0].source === "cache") chat.cache += 1;
+      }
+    }
+
+    for (const attempt of batch.classificationAttempts) {
+      const chat = ensureChat(attempt.chatId, attempt.attemptedAt, null, null);
+      const inserted = await duckQuery(
+        `INSERT INTO classification_attempt_dedup (update_id, chat_id, message_id, attempted_at)
+         VALUES ($1::BIGINT, $2::BIGINT, $3::BIGINT, $4::TIMESTAMPTZ)
+         ON CONFLICT (update_id) DO NOTHING
+         RETURNING chat_id`,
+        [attempt.updateId, attempt.chatId, attempt.messageId, attempt.attemptedAt],
+      );
+      if (inserted.rows.length > 0) chat.attempts += 1;
+    }
+
+    if (chats.size > 0) {
+      const values: string[] = [];
+      const params: unknown[] = [];
+      let index = 0;
+      for (const chat of chats.values()) {
+        const p = (offset: number) => `$${index + offset}`;
+        values.push(`(${p(1)}::BIGINT, ${p(2)}::TIMESTAMPTZ, ${p(3)}::TIMESTAMPTZ, ${p(4)}::TEXT, ${p(5)}::BOOLEAN, ${p(6)}::BIGINT, ${p(7)}::BIGINT, ${p(8)}::BIGINT)`);
+        params.push(chat.chatId, chat.firstSeenAt, chat.lastSeenAt, chat.chatType, chat.membershipActive, chat.deletions, chat.cache, chat.attempts);
+        index += 8;
+      }
+      await duckQuery(
+        `INSERT INTO known_chats (chat_id, first_seen_at, last_seen_at, chat_type, membership_active, successful_deletions, cache_deletions, processed_messages)
+         VALUES ${values.join(", ")}
+         ON CONFLICT (chat_id) DO UPDATE SET
+           first_seen_at = LEAST(known_chats.first_seen_at, EXCLUDED.first_seen_at),
+           last_seen_at = GREATEST(known_chats.last_seen_at, EXCLUDED.last_seen_at),
+           chat_type = COALESCE(EXCLUDED.chat_type, known_chats.chat_type),
+           membership_active = COALESCE(EXCLUDED.membership_active, known_chats.membership_active),
+           successful_deletions = known_chats.successful_deletions + EXCLUDED.successful_deletions,
+           cache_deletions = known_chats.cache_deletions + EXCLUDED.cache_deletions,
+           processed_messages = known_chats.processed_messages + EXCLUDED.processed_messages,
+           updated_at = NOW()`,
+        params,
+      );
+    }
+
+    await duckQuery(
+      "DELETE FROM deletion_dedup WHERE deleted_at < NOW() - ($1::INTEGER * INTERVAL 1 DAY)",
+      [DEDUPE_RETENTION_DAYS],
+    );
+    await duckQuery(
+      "DELETE FROM classification_attempt_dedup WHERE attempted_at < NOW() - ($1::INTEGER * INTERVAL 1 DAY)",
+      [DEDUPE_RETENTION_DAYS],
+    );
   }
 
   async close(): Promise<void> {
-    await this.pool.end();
+    // The DuckDB connection is shared process-wide and closed by lifecycle.ts.
   }
 
-  private async ensureMigrated(): Promise<void> {
+  private ensureMigrated(): Promise<void> {
     if (!this.migration) {
-      this.migration = readFile(MIGRATION_URL, "utf8")
-        .then((sql) => this.pool.query(sql))
-        .then(() => undefined)
-        .catch((error) => {
-          this.migration = undefined;
-          throw error;
-        });
+      this.migration = duckMigrate(MIGRATIONS_DIR).catch((error) => {
+        this.migration = undefined;
+        throw error;
+      });
     }
-    await this.migration;
+    return this.migration;
   }
 }
 
@@ -522,27 +472,8 @@ export class AsyncStatsBuffer implements StatsRecorder {
   }
 }
 
-class DisabledStatsRecorder implements StatsRecorder {
-  observeChat(): void {}
-  recordClassificationAttempt(): void {}
-  recordDeletion(): void {}
-  async stop(): Promise<StatsHealth> { return this.health(); }
-  health(): StatsHealth {
-    return {
-      pendingChats: 0,
-      pendingClassificationAttempts: 0,
-      pendingDeletions: 0,
-      droppedChats: 0,
-      droppedClassificationAttempts: 0,
-      droppedDeletions: 0,
-      flushFailures: 0,
-    };
-  }
-}
-
-export function createStatsRecorder(databaseUrl?: string): StatsRecorder {
-  if (!databaseUrl) return new DisabledStatsRecorder();
-  return new AsyncStatsBuffer(new PostgresStatsStore(databaseUrl));
+export function createStatsRecorder(): StatsRecorder {
+  return new AsyncStatsBuffer(new DuckDbStatsStore());
 }
 
 function normalizeId(id: number | bigint | string): string {

@@ -15,25 +15,34 @@ import type { TrainingCapture } from "./training-capture";
 
 export function registerBotHandlers(bot: Bot, {
   classifier,
+  visionClassifier,
   shadowClassifier,
   trainingCapture,
   deletionAudit,
   model,
+  visionModel,
   stats,
   logger = console,
   previewRequest,
   spamCache,
+  imageLoader,
   spamThreshold = 0.81,
 }: {
   classifier: Pick<JevSpamClassifier, "classify">;
+  /** Receives messages that carry an image (photo); usually a GLM vision model. */
+  visionClassifier?: Pick<JevSpamClassifier, "classify">;
   shadowClassifier?: Pick<JevSpamClassifier, "classify">;
   trainingCapture?: TrainingCapture;
   deletionAudit?: DeletionAudit;
   model: string;
+  /** Slug of the vision endpoint, for cache fingerprinting and logs. */
+  visionModel?: string;
   stats: StatsRecorder;
   logger?: Pick<Console, "info" | "error">;
   previewRequest?: PageRequest;
   spamCache?: SpamCache;
+  /** Resolves the current photo's file_id to a base64 data URL for the vision model. */
+  imageLoader?: (fileId: string) => Promise<string>;
   spamThreshold?: number;
 }): void {
   const admins = new AdminCache();
@@ -156,8 +165,9 @@ export function registerBotHandlers(bot: Bot, {
           logFailure("profile_metadata_failed", error, ctx.chat.id, ctx.msgId);
         }
       }
-      // Uncaptioned media needs actual sender-owned profile metadata.
-      if (mediaOnly && !senderProfile) {
+      // Uncaptioned media without a photo goes to the vision model only with actual
+      // sender-owned profile metadata; photos are judged by the image itself.
+      if (mediaOnly && !senderProfile && !message.photoFileId) {
         await skip("media_profile_unavailable");
         return;
       }
@@ -206,7 +216,18 @@ export function registerBotHandlers(bot: Bot, {
         senderProfilePresent: Boolean(senderProfile),
       }));
 
-      const classifierInput = senderProfile ? { ...moderationMessage, senderProfile } : moderationMessage;
+      const enrichedInput = senderProfile ? { ...moderationMessage, senderProfile } : moderationMessage;
+      // Vision attachment: resolve the photo to a data URL just before classification;
+      // failures degrade to text-only instead of blocking moderation.
+      let classifierInput = enrichedInput;
+      if (imageLoader && enrichedInput.photoFileId) {
+        try {
+          const imageDataUrl = await imageLoader(enrichedInput.photoFileId);
+          classifierInput = { ...enrichedInput, imageDataUrl };
+        } catch (error) {
+          logger.error(JSON.stringify({ event: "photo_load_failed", chatId: ctx.chat.id, messageId: ctx.msgId, outcome: String(error).slice(0, 160) }));
+        }
+      }
       const snapshot = deletionAudit ? auditSnapshot(ctx.msg, classifierInput, "edited_message" in ctx.update) : undefined;
       const fingerprint = spamCache ? cacheFingerprint(ctx.msg, senderId, classifierInput,
         recentMessages.length, model, spamThreshold, enrichmentComplete) : undefined;
@@ -224,9 +245,11 @@ export function registerBotHandlers(bot: Bot, {
         if (!cacheHit) {
           stats.recordClassificationAttempt({ chatId: ctx.chat.id, messageId: ctx.msgId, updateId: ctx.update.update_id });
           const chatId = ctx.chat.id, messageId = ctx.msgId;
-          assessment = await classifier.classify(classifierInput, context, trainingCapture
+          // Vision messages (photo attached) go to the GLM model; text to the Jev router.
+          const endpoint = classifierInput.imageDataUrl && visionClassifier ? visionClassifier : classifier;
+          assessment = await endpoint.classify(classifierInput, context, trainingCapture
             && ((request, answers, result) => trainingCapture.record(chatId, messageId, request, answers, result)));
-          if (fingerprint && assessment.model === model && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
+          if (fingerprint && assessment.model === (assessment.shouldDelete && classifierInput.imageDataUrl ? visionModel : model) && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
         }
       } catch (error) {
         if (!mediaOnly) history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });

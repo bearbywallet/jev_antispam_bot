@@ -22,7 +22,10 @@ test("candidate .81 media gate remains separate from text signals", async () => 
   for (const score of [0.809999, 0.81, 0.810001]) {
     const response = body("media_profile_funnel", score);
     response.answers.profile_bait = { type: "noul", noul: 0.99 };
-    const classifier = new JevSpamClassifier("fixture", { model: "jev-1.13.0", threshold: 0.81, timeoutMs: 1000, fetch: async () => Response.json(response) });
+    const classifier = new JevSpamClassifier("fixture", { model: "jev-1.13.0", threshold: 0.81, timeoutMs: 1000, fetch: async () => Response.json({
+      model: "jev-1.13.0", provider: "test-provider",
+      choices: [{ message: { role: "assistant", content: JSON.stringify(response) } }],
+    }) });
     expect((await classifier.classify({ text: "", mediaOnly: true, embeddedLinks: [], isForwarded: false })).shouldDelete).toBe(score >= 0.81);
     expect(parseAssessment(body("media_profile_funnel", 0.99), 0.81).shouldDelete).toBe(false);
   }

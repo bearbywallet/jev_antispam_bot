@@ -4,7 +4,7 @@ import type { UserFromGetMe, Update } from "grammy/types";
 import { trackHandlers, drainBot } from "./lifecycle";
 import { registerBotHandlers } from "./bot";
 import { AsyncStatsBuffer } from "./stats";
-import { PostgresDeletionAudit } from "./audit-outbox";
+import { DuckDbDeletionAudit } from "./audit-outbox";
 import { SPAM_QUESTIONS, type SpamAssessment } from "./spam";
 const testUrl = process.env.AUDIT_TEST_DATABASE_URL;
 if (testUrl && (!["127.0.0.1", "localhost"].includes(new URL(testUrl).hostname) || !["/jev_audit_test", "/jev_stats_test"].includes(new URL(testUrl).pathname))) throw new Error("Isolated local test database required");
@@ -25,7 +25,7 @@ for (const durable of [false, true]) (durable && !process.env.AUDIT_TEST_DATABAS
     if (method === "deleteMessage") { events.push("delete_started"); deleting.resolve(); await release.promise; events.push("delete_succeeded"); }
     return { ok: true, result: true } as never;
   });
-  const outbox = durable ? new PostgresDeletionAudit(process.env.AUDIT_TEST_DATABASE_URL!, bot.api) : undefined;
+  const outbox = durable ? new DuckDbDeletionAudit(bot.api) : undefined;
   if (outbox) await outbox.initialize();
   let intent: string | undefined;
   const stats = new AsyncStatsBuffer({ writeBatch: async () => {}, close: async () => {} }, { autoStart: false });

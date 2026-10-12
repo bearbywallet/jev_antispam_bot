@@ -1,14 +1,13 @@
 // Run only with release authorization using the product bot's protected environment.
 // No text, recipient, source-message, or content-export arguments are accepted.
 import { Api } from "grammy";
-import { AUDIT_CHAT_ID, PostgresDeletionAudit } from "../src/audit-outbox";
+import { AUDIT_CHAT_ID, DuckDbDeletionAudit } from "../src/audit-outbox";
 
 async function main() {
   const mode = process.argv[2];
   if (process.argv.length !== 3 || !["check", "send-integration"].includes(mode!)) throw new Error("Usage: bun scripts/audit-report.ts check|send-integration");
   const token = process.env.TELEGRAM_BOT_TOKEN;
-  const databaseUrl = process.env.DATABASE_URL;
-  if (!token || !databaseUrl) throw new Error("Protected bot token and database environment required");
+  if (!token) throw new Error("Protected bot token environment required");
   const api = new Api(token, { timeoutSeconds: 10 });
   const me = await api.getMe();
   const member = await api.getChatMember(AUDIT_CHAT_ID, me.id);
@@ -19,7 +18,7 @@ async function main() {
   console.info(JSON.stringify({ event: "audit_membership", canSend: Boolean(access) }));
   if (!access) throw new Error("Audit sink membership or send permission required");
   if (mode === "check") return;
-  const audit = new PostgresDeletionAudit(databaseUrl, api);
+  const audit = new DuckDbDeletionAudit(api);
   try {
     await audit.initialize();
     const id = await audit.integrationReport();

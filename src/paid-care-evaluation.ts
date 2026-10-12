@@ -34,11 +34,11 @@ export async function evaluateCare(classifier: JevSpamClassifier, [name, message
 }
 
 if (import.meta.main) {
-  if (process.env.RUN_LIVE_JEV !== "1" || !process.env.TYPESAFE_API_KEY) {
-    console.error("Opt in with RUN_LIVE_JEV=1 and an existing protected TYPESAFE_API_KEY environment.");
+  if (process.env.RUN_LIVE_ZAI !== "1" || !process.env.ZAI_API_KEY) {
+    console.error("Opt in with RUN_LIVE_ZAI=1 and an existing protected ZAI_API_KEY environment.");
     process.exitCode = 1;
   } else {
-    const classifier = new JevSpamClassifier(process.env.TYPESAFE_API_KEY, {
+    const classifier = new JevSpamClassifier(process.env.ZAI_API_KEY, {
       model: "jev-1.13.0", threshold: 0.9, timeoutMs: 10_000,
     });
     // One sequential attempt per case. No Telegram calls, source logging or retries.

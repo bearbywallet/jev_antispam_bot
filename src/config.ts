@@ -1,13 +1,19 @@
 import { effectiveModel } from "./policy";
 export type Config = {
   telegramBotToken: string;
-  typesafeApiKey: string;
-  databaseUrl?: string;
-  jevModel: string;
+  telegramApiBase: string;
+  // Text classifier: TypeSafe Jev router on OpenRouter.
+  openRouterApiKey: string;
+  openRouterUrl: string;
+  openRouterModel: string;
+  // Vision classifier: Z.AI GLM (photos).
+  zaiApiKey: string;
+  zaiUrl: string;
+  zaiModel: string;
+  duckdbPath: string;
   spamThreshold: number;
-  jevTimeoutMs: number;
-  jevUrl: string;
-  shadow?: { url: string; apiKey: string; model: string; timeoutMs: number };
+  classifierTimeoutMs: number;
+  shadow?: { model: string; timeoutMs: number };
 };
 
 function required(name: string): string {
@@ -30,25 +36,28 @@ export function loadConfig(): Config {
     throw new Error("SPAM_THRESHOLD must be between 0.5 and 1");
   }
 
-  const jevTimeoutMs = numberFromEnv("JEV_TIMEOUT_MS", 8_000);
-  if (!Number.isInteger(jevTimeoutMs) || jevTimeoutMs < 1_000 || jevTimeoutMs > 30_000) {
-    throw new Error("JEV_TIMEOUT_MS must be an integer between 1000 and 30000");
+  const classifierTimeoutMs = numberFromEnv("CLASSIFIER_TIMEOUT_MS", 15_000);
+  if (!Number.isInteger(classifierTimeoutMs) || classifierTimeoutMs < 1_000 || classifierTimeoutMs > 30_000) {
+    throw new Error("CLASSIFIER_TIMEOUT_MS must be an integer between 1000 and 30000");
   }
 
   return {
     telegramBotToken: required("TELEGRAM_BOT_TOKEN"),
-    typesafeApiKey: required("TYPESAFE_API_KEY"),
-    databaseUrl: process.env.DATABASE_URL?.trim() || undefined,
-    jevModel: effectiveModel(process.env.JEV_MODEL?.trim() || "jev-1.13.0"),
+    // Bot API base: must match where the file_id was minted when fetching photos.
+    telegramApiBase: process.env.TELEGRAM_API_BASE?.trim() || "https://api.telegram.org",
+    openRouterApiKey: required("OPENROUTER_API_KEY"),
+    openRouterUrl: process.env.OPENROUTER_URL?.trim() || "https://openrouter.ai/api/v1",
+    openRouterModel: effectiveModel(process.env.OPENROUTER_MODEL?.trim() || "typesafe/jev-router"),
+    zaiApiKey: required("ZAI_API_KEY"),
+    // Z.AI OpenAI-compatible endpoint (coding plan subscription).
+    zaiUrl: process.env.ZAI_URL?.trim() || "https://api.z.ai/api/coding/paas/v4",
+    zaiModel: effectiveModel(process.env.ZAI_MODEL?.trim() || "glm-4.6v"),
+    duckdbPath: process.env.DUCKDB_PATH?.trim() || "./data/antispam.duckdb",
     spamThreshold,
-    jevTimeoutMs,
-    // Any Jev wire-compatible /v1/systemone server, e.g. self-hosted laya-serve.
-    jevUrl: process.env.JEV_URL?.trim() || "https://api.typesafe.ai/v1/systemone",
+    classifierTimeoutMs,
     // Shadow classifier: logged next to the primary verdict, never deletes.
-    shadow: process.env.SHADOW_URL?.trim() ? {
-      url: process.env.SHADOW_URL.trim(),
-      apiKey: process.env.SHADOW_API_KEY?.trim() ?? "",
-      model: process.env.SHADOW_MODEL?.trim() || "multilingual",
+    shadow: process.env.SHADOW_MODEL?.trim() ? {
+      model: process.env.SHADOW_MODEL.trim(),
       timeoutMs: numberFromEnv("SHADOW_TIMEOUT_MS", 30_000),
     } : undefined,
   };

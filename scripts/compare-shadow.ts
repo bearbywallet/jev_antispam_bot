@@ -1,4 +1,4 @@
-// Compare shadow-classifier verdicts with the primary (Jev) ones from bot logs.
+// Compare shadow-classifier verdicts with the primary (OpenRouter) ones from bot logs.
 // Usage: docker service logs <service> 2>&1 | bun scripts/compare-shadow.ts [threshold]
 const threshold = Number(process.argv[2] ?? process.env.SPAM_THRESHOLD ?? 0.81);
 
@@ -25,7 +25,7 @@ console.log(`shadow rows ${rows.length}, compared ${done.length}, shadow failure
 console.log(`models ${[...new Set(done.map((row) => `${row.model}${row.route ? `/${row.route}` : ""}`))].join(", ")}; truncated ${done.filter((row) => row.truncated).length}`);
 console.log(`shadow latency p50 ${ms[Math.floor(ms.length / 2)] ?? "-"}ms p95 ${ms[Math.floor(ms.length * 0.95)] ?? "-"}ms\n`);
 
-console.log("gate   agree   both-spam  jev-only(missed)  shadow-only(extra)");
+console.log("gate   agree   both-spam  primary-only(missed)  shadow-only(extra)");
 for (const gate of [...new Set([0.5, 0.6, 0.7, 0.75, 0.81, 0.85, 0.9, 0.95, 0.99, threshold])].sort()) {
   const tp = done.filter((row) => primarySpam(row) && shadowSpam(row, gate)).length;
   const fn = done.filter((row) => primarySpam(row) && !shadowSpam(row, gate)).length;
@@ -39,5 +39,5 @@ const link = (row: Row) => String(row.chatId).startsWith("-100")
 const disagreements = done.filter((row) => primarySpam(row) !== shadowSpam(row));
 console.log(`\ndisagreements at ${threshold} (${disagreements.length}):`);
 for (const row of disagreements) {
-  console.log(`${primarySpam(row) ? "jev-only   " : "shadow-only"} jev=${row.primaryConfidence?.toFixed(3) ?? row.primaryDecision} shadow=${row.confidence?.toFixed(3)} ${row.strongestSignal} ${link(row)}`);
+  console.log(`${primarySpam(row) ? "primary-only" : "shadow-only"} primary=${row.primaryConfidence?.toFixed(3) ?? row.primaryDecision} shadow=${row.confidence?.toFixed(3)} ${row.strongestSignal} ${link(row)}`);
 }

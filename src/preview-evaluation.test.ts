@@ -15,6 +15,10 @@ function response(score = 0.01, links: number[] = []) {
     ...links.map((noul, index) => ["context_message_" + index, { type: "noul", noul }]),
   ]) };
 }
+const envelope = (raw: unknown) => ({
+  model: "jev-1.13.0", provider: "test-provider",
+  choices: [{ message: { role: "assistant", content: JSON.stringify(raw) } }],
+});
 const options = { model: "jev-1.13.0", threshold: 0.9, timeoutMs: 1_000 };
 const mixed = previewFixtures.find(f => f.id === "mixed-history")!;
 
@@ -23,18 +27,20 @@ for (const fixture of previewFixtures) {
     const classifier = new JevSpamClassifier("test-key", { ...options, fetch: async (_url, init) => {
       const body = JSON.parse(String(init?.body));
       expect(body.model).toBe("jev-1.13.0");
-      expect(body.state.message).toEqual(toModerationMessage(fixture.message));
-      expect(body.state.message.text).toBe(fixture.message.text);
-      expect(body.state.recentMessages).toEqual(fixture.recent.map(toModerationMessage));
-      expect(Object.keys(body.questions).filter(key => key.startsWith("context_message_"))).toEqual(
+      const state = JSON.parse(body.messages[1].content);
+      expect(state.message).toEqual(toModerationMessage(fixture.message));
+      expect(state.message.text).toBe(fixture.message.text);
+      expect(state.recentMessages).toEqual(fixture.recent.map(toModerationMessage));
+      for (const key of fixture.recent.map((_: unknown, i: number) => "context_message_" + i)) {
+        expect(body.messages[0].content).toContain(`[${key}]`);
+      }
+      expect(state.recentMessages.map((_message: unknown, index: number) => "context_message_" + index)).toEqual(
         fixture.recent.map((_message, index) => "context_message_" + index));
       if (fixture.message.reply_to_message || fixture.message.external_reply || fixture.recent.length) {
-        for (const question of Object.values(body.questions) as { instructions: string }[]) {
-          expect(question.instructions).toContain("untrusted data");
-          expect(question.instructions).toContain("Respect each historical message's own preview");
-        }
+        expect(body.messages[0].content).toContain("untrusted data");
+        expect(body.messages[0].content).toContain("Respect each historical message's own preview");
       }
-      return Response.json(response(0.01, fixture.recent.map(() => 0.99)));
+      return Response.json(envelope(response(0.01, fixture.recent.map(() => 0.99))));
     } });
     const result = await evaluatePreview(classifier, fixture);
     expect(result.contextProbabilities).toHaveLength(fixture.recent.length);
@@ -55,7 +61,7 @@ test("per-message requested context and inaccessible content remain distinguisha
 test("strict parser gates current deletion and selects only independently linked suffix", async () => {
   for (const [score, ids] of [[0.899, []], [0.9, [11, 100]]] as const) {
     const classifier = new JevSpamClassifier("test-key", { ...options,
-      fetch: async () => Response.json(response(score, [0.01, 0.99])),
+      fetch: async () => Response.json(envelope(response(score, [0.01, 0.99]))),
     });
     const result = await evaluatePreview(classifier, mixed);
     expect(result.selectedMessageIds).toEqual([...ids]);
@@ -64,7 +70,7 @@ test("strict parser gates current deletion and selects only independently linked
   for (const key of ["context_message_0", "context_message_1", "quoted_promotion_amplification"]) {
     const invalid = response(0.99, [0.01, 0.99]);
     delete invalid.answers[key];
-    const classifier = new JevSpamClassifier("test-key", { ...options, fetch: async () => Response.json(invalid) });
+    const classifier = new JevSpamClassifier("test-key", { ...options, fetch: async () => Response.json(envelope(invalid)) });
     await expect(evaluatePreview(classifier, mixed)).rejects.toThrow("invalid " + key + " answer");
   }
 });
@@ -89,17 +95,17 @@ for (const missingLink of [false, true]) {
       if (method === "deleteMessage") deletes.push(payload as { chat_id: number; message_id: number });
       return { ok: true, result: true } as never;
     });
-    let currentRequest: { state: { recentMessages: unknown[] }; questions: Record<string, unknown> } | undefined;
+    let currentRequest: unknown;
     const classifier = new JevSpamClassifier("test-key", { ...options, fetch: async (_url, init) => {
       const body = JSON.parse(String(init?.body));
-      const isCurrent = body.state.message.text === mixed.message.text;
+      const isCurrent = JSON.parse(body.messages[1].content).message.text === mixed.message.text;
       if (isCurrent) {
         currentRequest = body;
         const answer = response(0.99, [0.01, 0.99]);
         if (missingLink) delete answer.answers.context_message_0;
-        return Response.json(answer);
+        return Response.json(envelope(answer));
       }
-      return Response.json(response(0.01, body.state.recentMessages.map(() => 0.01)));
+      return Response.json(envelope(response(0.01, JSON.parse(body.messages[1].content).recentMessages.map(() => 0.01))));
     } });
     registerBotHandlers(bot, { classifier, model: options.model, stats, logger });
     let update = 0;
@@ -111,9 +117,10 @@ for (const missingLink of [false, true]) {
     await send(mixed.message);
     // Assert outside the handler: its fail-open catch must not swallow assertion failures.
     expect(currentRequest).toBeDefined();
-    expect(currentRequest!.state.recentMessages).toEqual(mixed.recent.map(toModerationMessage));
-    expect(currentRequest!.questions).toHaveProperty("context_message_0");
-    expect(currentRequest!.questions).toHaveProperty("context_message_1");
+    const state = JSON.parse((currentRequest as { messages: [{ content: string }, { content: string }] }).messages[1].content);
+    expect(state.recentMessages).toEqual(mixed.recent.map(toModerationMessage));
+    expect((currentRequest as { messages: [{ content: string }] }).messages[0].content).toContain("context_message_0");
+    expect((currentRequest as { messages: [{ content: string }] }).messages[0].content).toContain("context_message_1");
     expect(deletes).toEqual(missingLink ? [] : [11, 100].map(message_id => ({ chat_id: mixed.message.chat.id, message_id })));
     if (missingLink) expect(logs.some(log => log.event === "classification_failed")).toBe(true);
     expect(JSON.stringify(logs)).not.toContain(previewAdText);

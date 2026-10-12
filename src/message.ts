@@ -36,9 +36,11 @@ function kind(origin: { type: string } | undefined): "user" | "chat" | "channel"
   return "unknown";
 }
 
-export function toModerationMessage(message: Message): ModerationMessage | null {
+export function toModerationMessage(message: Message): (ModerationMessage & { photoFileId?: string }) | null {
   const current = sourceText(message, MAX_CURRENT_CHARS);
   const inlineButtons = inlineUrlButtons(message);
+  // Largest photo variant only: Telegram scales share one file_id per size tier.
+  const photo = "photo" in message && message.photo ? message.photo.at(-1) : undefined;
   const mediaOnly = !current.text?.trim() && ("sticker" in message || "photo" in message || "video" in message || "animation" in message);
   if (!current.text?.trim() && !mediaOnly) return null;
 
@@ -94,5 +96,7 @@ export function toModerationMessage(message: Message): ModerationMessage | null 
     ...(inlineButtons.length ? { inlineButtons } : {}),
     isForwarded: "forward_origin" in message && Boolean(message.forward_origin),
     ...(preview.length ? { preview } : {}),
+    // Resolved to a data URL by the classifier's imageLoader; never persisted.
+    ...(photo ? { photoFileId: photo.file_id } : {}),
   };
 }

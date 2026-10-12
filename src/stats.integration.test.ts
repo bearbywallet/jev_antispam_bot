@@ -1,12 +1,16 @@
 import { expect, test } from "bun:test";
-import pg from "pg";
-import { AsyncStatsBuffer, PostgresStatsStore, type StatsBatch, type StatsStore } from "./stats";
+import { DuckDbStatsStore, AsyncStatsBuffer, type StatsBatch, type StatsStore } from "./stats";
+import { closeDuck, duckQuery } from "./duck";
 
-const databaseUrl = process.env.TEST_DATABASE_URL;
-if (databaseUrl && !["/jev_stats_test", "/jev_ticket5_test"].includes(new URL(databaseUrl).pathname)) {
-  throw new Error("TEST_DATABASE_URL must target jev_stats_test or jev_ticket5_test");
+process.env.DUCKDB_PATH = process.env.DUCKDB_PATH || "/tmp/jev_stats_test.duckdb";
+const integrationTest = process.env.DUCKDB_PATH ? test : test.skip;
+
+async function knownChats(chatId: string) {
+  return (await duckQuery(
+    "SELECT chat_id, first_seen_at, last_seen_at, chat_type, membership_active, successful_deletions, cache_deletions, processed_messages FROM known_chats WHERE chat_id = $1::BIGINT",
+    [chatId],
+  )).rows;
 }
-const integrationTest = databaseUrl ? test : test.skip;
 
 integrationTest("runs the idempotent migration and persists restart-safe deletion totals", async () => {
   const chatId = "-9223372036854775707";
@@ -28,11 +32,11 @@ integrationTest("runs the idempotent migration and persists restart-safe deletio
     }],
   };
 
-  const firstStore = new PostgresStatsStore(databaseUrl!, 2_000);
+  const firstStore = new DuckDbStatsStore();
   await firstStore.writeBatch(firstBatch);
   await firstStore.close();
 
-  const restartedStore = new PostgresStatsStore(databaseUrl!, 2_000);
+  const restartedStore = new DuckDbStatsStore();
   await restartedStore.writeBatch({
     chats: [{
       chatId,
@@ -46,33 +50,27 @@ integrationTest("runs the idempotent migration and persists restart-safe deletio
   });
   await restartedStore.close();
 
-  const pool = new pg.Pool({ connectionString: databaseUrl!, max: 1 });
-  const row = await pool.query(
-    "SELECT chat_id::text, first_seen_at, last_seen_at, chat_type, membership_active, successful_deletions::text, processed_messages::text FROM known_chats WHERE chat_id = $1::bigint",
-    [chatId],
-  );
-  const aggregate = await pool.query(
-    "SELECT COALESCE(SUM(successful_deletions), 0)::text AS total FROM known_chats WHERE chat_id = $1::bigint",
-    [chatId],
-  );
-  await pool.end();
-
-  expect(row.rows[0]).toMatchObject({
+  const rows = await knownChats(chatId);
+  expect(rows[0]).toMatchObject({
     chat_id: chatId,
     chat_type: "supergroup",
     membership_active: false,
-    successful_deletions: "1",
-    processed_messages: "1",
+    successful_deletions: 1,
+    processed_messages: 1,
   });
-  expect(new Date(row.rows[0].first_seen_at).toISOString()).toBe("2026-09-18T01:00:00.000Z");
-  expect(new Date(row.rows[0].last_seen_at).toISOString()).toBe("2026-09-18T02:00:00.000Z");
-  expect(aggregate.rows[0]?.total).toBe("1");
+  expect(new Date(rows[0]!.first_seen_at as string).toISOString()).toBe("2026-09-18T01:00:00.000Z");
+  expect(new Date(rows[0]!.last_seen_at as string).toISOString()).toBe("2026-09-18T02:00:00.000Z");
+  const aggregate = await duckQuery(
+    "SELECT COALESCE(SUM(successful_deletions), 0) AS total FROM known_chats WHERE chat_id = $1::BIGINT",
+    [chatId],
+  );
+  expect(Number(aggregate.rows[0]?.total)).toBe(1);
 });
 
 integrationTest("a commit-uncertain retry cannot double-count a deletion", async () => {
   const chatId = "-9223372036854775607";
   const messageId = "9223372036854775002";
-  const delegate = new PostgresStatsStore(databaseUrl!, 2_000);
+  const delegate = new DuckDbStatsStore();
   let throwAfterCommit = true;
   const uncertainStore: StatsStore = {
     writeBatch: async (batch) => {
@@ -96,14 +94,9 @@ integrationTest("a commit-uncertain retry cannot double-count a deletion", async
   await stats.flush();
   await stats.stop();
 
-  const pool = new pg.Pool({ connectionString: databaseUrl!, max: 1 });
-  const result = await pool.query(
-    "SELECT successful_deletions::text, processed_messages::text FROM known_chats WHERE chat_id = $1::bigint",
-    [chatId],
-  );
-  await pool.end();
-  expect(result.rows[0]?.successful_deletions).toBe("1");
-  expect(result.rows[0]?.processed_messages).toBe("1");
+  const rows = await knownChats(chatId);
+  expect(rows[0]!.successful_deletions).toBe(1);
+  expect(rows[0]!.processed_messages).toBe(1);
 });
 
 integrationTest("prunes expired classification dedupe rows while preserving recent retry dedupe", async () => {
@@ -116,16 +109,11 @@ integrationTest("prunes expired classification dedupe rows while preserving rece
     updateId: recentUpdateId,
     attemptedAt: new Date().toISOString(),
   };
-  const store = new PostgresStatsStore(databaseUrl!, 2_000);
+  const store = new DuckDbStatsStore();
 
   await store.writeBatch({ chats: [], deletions: [], classificationAttempts: [] });
-  const setupPool = new pg.Pool({ connectionString: databaseUrl!, max: 1 });
-  await setupPool.query(
-    "DELETE FROM classification_attempt_dedup WHERE update_id = ANY($1::bigint[])",
-    [[oldUpdateId, recentUpdateId]],
-  );
-  await setupPool.query("DELETE FROM known_chats WHERE chat_id = $1::bigint", [chatId]);
-  await setupPool.end();
+  await duckQuery("DELETE FROM classification_attempt_dedup WHERE update_id IN (SELECT unnest(CAST($1::JSON AS BIGINT[])))", [JSON.stringify([oldUpdateId, recentUpdateId])]);
+  await duckQuery("DELETE FROM known_chats WHERE chat_id = $1::BIGINT", [chatId]);
 
   await store.writeBatch({
     chats: [],
@@ -137,6 +125,8 @@ integrationTest("prunes expired classification dedupe rows while preserving rece
       attemptedAt: "2025-01-01T00:00:00.000Z",
     }, recentAttempt],
   });
+  // The old attempt's dedupe row was written, then immediately pruned by the
+  // retention sweep inside writeBatch; re-writing it counts a second message.
   await store.writeBatch({
     chats: [],
     deletions: [],
@@ -144,19 +134,16 @@ integrationTest("prunes expired classification dedupe rows while preserving rece
   });
   await store.close();
 
-  const pool = new pg.Pool({ connectionString: databaseUrl!, max: 1 });
-  const dedupeRows = await pool.query(
-    "SELECT update_id::text FROM classification_attempt_dedup WHERE update_id = ANY($1::bigint[]) ORDER BY update_id",
-    [[oldUpdateId, recentUpdateId]],
+  const dedupeRows = await duckQuery(
+    "SELECT update_id FROM classification_attempt_dedup WHERE update_id IN (SELECT unnest(CAST($1::JSON AS BIGINT[]))) ORDER BY update_id",
+    [JSON.stringify([oldUpdateId, recentUpdateId])],
   );
-  const total = await pool.query(
-    "SELECT processed_messages::text FROM known_chats WHERE chat_id = $1::bigint",
+  const total = await duckQuery(
+    "SELECT processed_messages FROM known_chats WHERE chat_id = $1::BIGINT",
     [chatId],
   );
-  await pool.end();
-
   expect(dedupeRows.rows).toEqual([{ update_id: recentUpdateId }]);
-  expect(total.rows[0]?.processed_messages).toBe("2");
+  expect(Number(total.rows[0]?.processed_messages)).toBe(2);
 });
 
 const silentLogger = { info: () => undefined, error: () => undefined };

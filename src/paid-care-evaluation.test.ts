@@ -10,16 +10,20 @@ function response(score: number, links: number[]) {
   ]) };
 }
 // Artificial answers prove builder/parser/selector behavior, not model accuracy.
+const envelope = (raw: unknown) => ({
+  model: options.model, provider: "test-provider",
+  choices: [{ message: { role: "assistant", content: JSON.stringify(raw) } }],
+});
 for (const fixture of careEvaluationCases) {
   test("care evaluation uses actual complete contract: " + fixture[0], async () => {
     const classifier = new JevSpamClassifier("test-only", { ...options, fetch: async (_url, init) => {
       const body = JSON.parse(String(init?.body));
       expect(body.model).toBe(options.model);
-      expect(body.state).toEqual({ message: fixture[1], recentMessages: fixture[2] });
-      expect(Object.keys(body.questions)).toEqual([
-        ...Object.keys(SPAM_QUESTIONS), ...fixture[2].map((_, i) => "context_message_" + i),
-      ]);
-      return Response.json(response(0.899, fixture[2].map(() => 0.99)));
+      expect(JSON.parse(body.messages[1].content)).toEqual({ message: fixture[1], recentMessages: fixture[2] });
+      for (const key of [...Object.keys(SPAM_QUESTIONS), ...fixture[2].map((_, i) => "context_message_" + i)]) {
+        expect(body.messages[0].content).toContain(`[${key}]`);
+      }
+      return Response.json(envelope(response(0.899, fixture[2].map(() => 0.99))));
     } });
     const result = await evaluateCare(classifier, fixture);
     expect(result.shouldDelete).toBe(false);
@@ -35,7 +39,7 @@ test("care evaluation separates current gate and contiguous suffix including a r
     [0.9, [0.99, 0.1, 0.8], [3, 4]],
     [0.9, [0.99, 0.99, 0.749], [4]],
   ] as [number, number[], number[]][]) {
-    const classifier = new JevSpamClassifier("test-only", { ...options, fetch: async () => Response.json(response(score, links)) });
+    const classifier = new JevSpamClassifier("test-only", { ...options, fetch: async () => Response.json(envelope(response(score, links))) });
     const result = await evaluateCare(classifier, mixed);
     expect(result.selectedMessageIds).toEqual(ids);
   }
@@ -44,7 +48,7 @@ test("care evaluation rejects every missing dynamic answer and never returns par
   for (const key of ["unsolicited_paid_care_recruitment", "context_message_0", "context_message_1", "context_message_2"]) {
     const body = response(0.99, [0.1, 0.99, 0.99]);
     delete body.answers[key];
-    const classifier = new JevSpamClassifier("test-only", { ...options, fetch: async () => Response.json(body) });
+    const classifier = new JevSpamClassifier("test-only", { ...options, fetch: async () => Response.json(envelope(body)) });
     await expect(evaluateCare(classifier, mixed)).rejects.toThrow("invalid " + key + " answer");
   }
 });

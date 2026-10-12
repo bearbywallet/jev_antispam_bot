@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import pg from "pg";
+import { fileURLToPath } from "node:url";
 import type { Message } from "grammy/types";
+import { duckMigrate, duckQuery } from "./duck";
 import { SPAM_QUESTIONS, type CurrentModerationMessage, type SpamAssessment } from "./spam";
 
 // Source digest invalidates on prompt, projection, enrichment or gate changes.
@@ -61,21 +62,17 @@ export function confirmedSpam(assessment: SpamAssessment, threshold: number): bo
     });
 }
 
-export type SpamCache = Pick<PostgresSpamCache, "lookup" | "seed">;
-export class PostgresSpamCache {
-  private readonly pool: pg.Pool;
+export type SpamCache = Pick<DuckDbSpamCache, "lookup" | "seed">;
+const MIGRATIONS_DIR = fileURLToPath(new URL("../migrations/duck", import.meta.url));
+export class DuckDbSpamCache {
   private migration?: Promise<void>;
+  private writer: Promise<unknown> = Promise.resolve();
   private active = 0;
   private readonly counters = { hit: 0, miss: 0, error: 0, eviction: 0 };
-  constructor(databaseUrl: string, private readonly options: {
+  constructor(private readonly options: {
     timeoutMs?: number; ttlMs?: number; capacity?: number; revision?: string;
     logger?: Pick<Console, "info">;
   } = {}) {
-    this.pool = new pg.Pool({ connectionString: databaseUrl, max: 2,
-      connectionTimeoutMillis: this.timeout, query_timeout: this.timeout,
-      statement_timeout: Math.max(1, this.timeout - 20), idleTimeoutMillis: 10_000,
-      application_name: "jev_antispam_bot_cache" });
-    this.pool.on("error", () => undefined);
     if (!Number.isInteger(this.capacity) || this.capacity < 1 || this.capacity > 100_000
       || this.ttl < 1 || this.ttl > 86_400_000) throw new Error("Invalid spam cache bounds");
   }
@@ -84,11 +81,11 @@ export class PostgresSpamCache {
   private get ttl() { return this.options.ttlMs ?? 86_400_000; }
   private get revision() { return this.options.revision ?? CACHE_POLICY_REVISION; }
   health() { return { ...this.counters }; }
-  async close() { await this.pool.end(); }
+  async close() { /* The DuckDB connection is shared process-wide; lifecycle.ts closes it. */ }
   async lookup(fingerprint: string): Promise<boolean> {
     const hit = await this.bounded(async () => {
       await this.ensureMigrated();
-      const result = await this.pool.query("SELECT 1 FROM spam_verdict_cache WHERE fingerprint=$1 AND revision=$2 AND expires_at > NOW() AND verdict = TRUE", [fingerprint, this.revision]);
+      const result = await duckQuery("SELECT 1 AS ok FROM spam_verdict_cache WHERE fingerprint=$1 AND revision=$2 AND expires_at > NOW() AND verdict = TRUE", [fingerprint, this.revision]);
       return result.rowCount === 1;
     });
     if (hit !== undefined) this.count(hit ? "hit" : "miss");
@@ -97,30 +94,22 @@ export class PostgresSpamCache {
   async seed(fingerprint: string): Promise<void> {
     await this.bounded(async () => {
       await this.ensureMigrated();
-      const client = await this.pool.connect();
-      try {
-        await client.query("BEGIN");
-        // Serialize all writers across processes; hard capacity is not approximate.
-        await client.query("SELECT pg_advisory_xact_lock(1936744813)");
-        const expired = await client.query("DELETE FROM spam_verdict_cache WHERE expires_at <= NOW() OR revision <> $1", [this.revision]);
-        await client.query(
-          "INSERT INTO spam_verdict_cache(fingerprint, revision, verdict, expires_at) VALUES ($1,$2,TRUE,NOW()+$3 * INTERVAL '1 millisecond') ON CONFLICT (fingerprint) DO NOTHING",
+      // DuckDB is single-writer: a promise-chain mutex replaces the advisory lock.
+      const run = this.writer.then(async () => {
+        const expired = await duckQuery("DELETE FROM spam_verdict_cache WHERE expires_at <= NOW() OR revision <> $1", [this.revision]);
+        await duckQuery(
+          "INSERT INTO spam_verdict_cache(fingerprint, revision, verdict, expires_at) VALUES ($1,$2,TRUE,NOW()+$3::BIGINT*INTERVAL 1 MILLISECOND) ON CONFLICT (fingerprint) DO NOTHING",
           [fingerprint, this.revision, this.ttl]);
-        const pruned = await client.query("DELETE FROM spam_verdict_cache WHERE fingerprint IN (SELECT fingerprint FROM spam_verdict_cache ORDER BY expires_at DESC, fingerprint DESC OFFSET $1)", [this.capacity]);
-        await client.query("COMMIT");
-        this.count("eviction", (expired.rowCount ?? 0) + (pruned.rowCount ?? 0));
-        client.release();
-      } catch (error) {
-        // Destroying a failed transaction connection rolls it back, even after timeout.
-        client.release(true);
-        throw error;
-      }
+        const pruned = await duckQuery("DELETE FROM spam_verdict_cache WHERE fingerprint IN (SELECT fingerprint FROM spam_verdict_cache ORDER BY expires_at DESC, fingerprint DESC OFFSET $1::INTEGER)", [this.capacity]);
+        this.count("eviction", expired.rowCount + pruned.rowCount);
+      });
+      this.writer = run.catch(() => undefined);
+      await run;
       return true;
     });
   }
   private async ensureMigrated() {
-    this.migration ??= this.pool.query(readFileSync(new URL("../migrations/002_spam_cache.sql", import.meta.url), "utf8"))
-      .then(() => undefined).catch(error => { this.migration = undefined; throw error; });
+    this.migration ??= duckMigrate(MIGRATIONS_DIR).catch(error => { this.migration = undefined; throw error; });
     await this.migration;
   }
   private async bounded<T>(operation: () => Promise<T>): Promise<T | undefined> {

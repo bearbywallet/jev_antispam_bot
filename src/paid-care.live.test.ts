@@ -2,9 +2,9 @@ import { expect, test } from "bun:test";
 import { CONTEXT_LINK_THRESHOLD, JevSpamClassifier } from "./spam";
 import { careControls, careInvitation, careRequest, careVariants, careWhitespaceVariants, laptopPreview, normalizedCare, photoCare, reportedCare, rvPreview } from "./fixtures/paid-care";
 
-const key = process.env.TYPESAFE_API_KEY;
-const live = process.env.RUN_LIVE_JEV === "1" && key ? test : test.skip;
-const classifier = new JevSpamClassifier(key ?? "unused", { model: "jev-1.13.0", threshold: 0.9, timeoutMs: 10_000 });
+const key = process.env.ZAI_API_KEY;
+const live = process.env.RUN_LIVE_ZAI === "1" && key ? test : test.skip;
+const classifier = new JevSpamClassifier(key ?? "unused", { model: "glm-4.6v", threshold: 0.9, timeoutMs: 25_000 });
 
 for (const [index, text] of [reportedCare, ...careWhitespaceVariants, ...careVariants].entries()) {
   for (const [label, source, expected] of [
@@ -13,7 +13,7 @@ for (const [index, text] of [reportedCare, ...careWhitespaceVariants, ...careVar
   ] as const) {
     live("care offer " + index + ": " + label, async () => {
       const result = await classifier.classify(normalizedCare(text, source));
-      expect(result.model).toBe("jev-1.13.0");
+      expect(result.model).toBe("glm-4.6v");
       expect(result.contextProbabilities).toHaveLength(0);
       expect(result.shouldDelete).toBe(expected);
     });

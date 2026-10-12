@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { Api, GrammyError } from "grammy";
-import { AUDIT_CHAT_ID, sendAuditReport, PostgresDeletionAudit } from "./audit-outbox";
+import { AUDIT_CHAT_ID, sendAuditReport, DuckDbDeletionAudit } from "./audit-outbox";
 
 test("product grammY transport fixes sink, HTML and disabled previews without keyboards", async () => {
   const calls: unknown[] = [];
@@ -32,7 +32,7 @@ test("known Telegram errors are preserved for outbox classification", async () =
 });
 
 test("invalid intent inputs fail closed before any database connection", async () => {
-  const outbox = new PostgresDeletionAudit("postgresql://test@127.0.0.1:1/jev_audit_test", new Api("123:fixture"));
+  const outbox = new DuckDbDeletionAudit(new Api("123:fixture"));
   try {
     expect(await outbox.prepare(AUDIT_CHAT_ID, 1, "fixture")).toBeUndefined();
     expect(await outbox.prepare(-1, 0, "fixture")).toBeUndefined();

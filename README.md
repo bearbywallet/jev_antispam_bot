@@ -25,8 +25,8 @@ Group administrators, bot senders, and genuine anonymous group administrators (`
    ```
 
    - `TELEGRAM_BOT_TOKEN`: token from BotFather
-   - `TYPESAFE_API_KEY`: TypeSafe API key
-   - `DATABASE_URL` (optional): private PostgreSQL connection URL for chat/deletion statistics
+   - `ZAI_API_KEY`: Z.AI API key (coding plan, https://z.ai) — the GLM vision classifier endpoint
+   - `DUCKDB_PATH` (optional): local DuckDB database file for chat/deletion statistics and the deletion audit outbox. Defaults to `./data/antispam.duckdb`; the directory is created automatically.
 
 3. Install and run:
 
@@ -48,9 +48,9 @@ The bot keeps up to ten messages per chat and sender in memory for about ten min
 
 History keys distinguish users from channel identities and isolate receiving groups; synthetic Telegram sender users never combine separate channels. The history is process-local and expires automatically; it is not persisted or logged. The bot does not log message text, sender identity, profile metadata, or personal-channel metadata. Each analyzed message produces structured JSON logs with chat/message IDs, message size and link count, a boolean profile-metadata-presence flag, a media-only flag, all spam-signal probabilities, the strongest signal, the final keep/delete decision, model version, and analysis duration. Failed optional profile lookups for text continue with message-only classification, while uncaptioned media without usable sender-owned profile metadata is kept unclassified; failed classifications emit a terminal fail-open `keep` result with unavailable probabilities, and successful deletions are logged separately.
 
-When `DATABASE_URL` is set, the bot also records each chat ID observed in normal Telegram updates, first/last-seen timestamps, chat type, membership-active state when Telegram supplies it, and a lifetime count of confirmed successful deletions. It never stores message text, user profiles, Jev prompts, or credentials unless training capture is explicitly enabled (below). Statistics are optional and fail open: database startup, migration, latency, or outages never block moderation or Telegram deletion calls.
+When the DuckDB file is writable, the bot also records each chat ID observed in normal Telegram updates, first/last-seen timestamps, chat type, membership-active state when Telegram supplies it, and a lifetime count of confirmed successful deletions. It never stores message text, user profiles, Jev prompts, or credentials unless training capture is explicitly enabled (below). Statistics are optional and fail open: database startup, migration, latency, or outages never block moderation or Telegram deletion calls.
 
-Database writes use one connection and one bounded asynchronous flusher. Chat sightings are coalesced, deletion identities are deduplicated by `(chat_id, message_id)`, and each atomic batch increments counters only for newly inserted identities. Dedupe identities expire after 90 days; lifetime counters do not. The defaults cap pending memory at 1,000 chats plus 1,000 deletions, batch up to 100 of each per flush, retry with exponential backoff and jitter, and attempt a five-second shutdown drain without bypassing retry delays. New observations are ignored once shutdown begins, and no timer or database write starts after the store-close boundary. An abrupt process/container crash, shutdown deadline, or queue overflow can lose records that have not reached PostgreSQL; moderation remains available and overflow/failure health is emitted as rate-limited structured logs.
+Database writes use one connection and one bounded asynchronous flusher. Chat sightings are coalesced, deletion identities are deduplicated by `(chat_id, message_id)`, and each atomic batch increments counters only for newly inserted identities. Dedupe identities expire after 90 days; lifetime counters do not. The defaults cap pending memory at 1,000 chats plus 1,000 deletions, batch up to 100 of each per flush, retry with exponential backoff and jitter, and attempt a five-second shutdown drain without bypassing retry delays. New observations are ignored once shutdown begins, and no timer or database write starts after the store-close boundary. An abrupt process/container crash, shutdown deadline, or queue overflow can lose records that have not reached the DuckDB file; moderation remains available and overflow/failure health is emitted as rate-limited structured logs.
 
 Every new/edited message skipped before classification emits exactly one `message_skipped` record with `decision:"keep"`, receiving chat/message IDs, edited flag, and a specific reason: `private_chat`, `unsupported_chat_type`, `no_text_or_caption`, `media_profile_unavailable`, `missing_sender`, `bot_itself`, `bot_sender`, `group_admin`, `anonymous_group_admin`, `official_linked_channel`, `unsupported_sender_chat`, `sender_chat_metadata_invalid`, `sender_chat_metadata_failed`, or `admin_metadata_failed`. No sender ID, channel ID, display name, forward origin, text, caption, or API error description is logged. Mandatory sender-chat or administrator metadata failures keep the message and do not add it to classification history; a kept uncaptioned-media message is likewise never added.
 
@@ -58,15 +58,15 @@ Every new/edited message skipped before classification emits exactly one `messag
 
 `bun run check` runs typechecking and deterministic tests, including the real grammY handlers with mocked Telegram/classifier calls. These tests prove routing, deletion selection, skip telemetry, history isolation, and unchanged statistics hooks—not live Jev probabilities or Telegram UI behavior.
 
-Live model regression tests require explicit `RUN_LIVE_JEV=1` plus a valid `TYPESAFE_API_KEY`:
+Live model regression tests require explicit `RUN_LIVE_ZAI=1` plus a valid `ZAI_API_KEY`:
 
 ```sh
 RUN_LIVE_JEV=1 bun test src/spam.live.test.ts
 ```
 
-The suite includes a known Chinese advertisement, synthetic testimonial promotions across destination types, and forwarded/non-forwarded controls for requested recommendations, ordinary experience, warnings, support, citations, moderation quotes and bare links. To check a private reported post without retaining it as a fixture, supply its transcription on stdin with `JEV_PRIVATE_FIXTURE_STDIN=1 RUN_LIVE_JEV=1 bun test src/spam.live.test.ts -t "private screenshot"`; the test asserts probabilities without printing the text. The authorized default gate is 0.81 (a score cutoff, not calibrated correctness); do not treat mocked handler outcomes as model calibration. Optional real-account Telegram checks provide additional evidence but do not block the General review/test/CI release gate.
+The suite includes a known Chinese advertisement, synthetic testimonial promotions across destination types, and forwarded/non-forwarded controls for requested recommendations, ordinary experience, warnings, support, citations, moderation quotes and bare links. To check a private reported post without retaining it as a fixture, supply its transcription on stdin with `JEV_PRIVATE_FIXTURE_STDIN=1 RUN_LIVE_ZAI=1 bun test src/spam.live.test.ts -t "private screenshot"`; the test asserts probabilities without printing the text. The authorized default gate is 0.81 (a score cutoff, not calibrated correctness); do not treat mocked handler outcomes as model calibration. Optional real-account Telegram checks provide additional evidence but do not block the General review/test/CI release gate.
 
-Media-profile fixture disposition and attribution boundaries are documented in [Media-profile evidence](docs/media-profile-evidence.md). Run its optional pinned-model suite with `RUN_LIVE_JEV=1 bun test src/media.live.test.ts`; the previously accused media cases are ambiguity controls, not confirmed recall misses. PostgreSQL integration tests separately require a disposable test database (`TEST_DATABASE_URL`); never point them at production.
+Media-profile fixture disposition and attribution boundaries are documented in [Media-profile evidence](docs/media-profile-evidence.md). Run its optional pinned-model suite with `RUN_LIVE_ZAI=1 bun test src/media.live.test.ts`; the previously accused media cases are ambiguity controls, not confirmed recall misses. DuckDB integration tests use disposable files under `/tmp` automatically; they never touch production data.
 
 ## Shadow classifier and self-hosted models
 
@@ -82,9 +82,9 @@ It prints agreement, Jev-only and shadow-only spam at several gates, and the dis
 
 ### Training capture (opt-in)
 
-`TRAINING_CAPTURE=true` (requires `DATABASE_URL`) stores every successful Jev classification in the `training_samples` table so a self-hosted model can be distilled from Jev: the exact request sent to Jev (current message text, recent same-sender messages, reply previews, and the sender's bio/personal-channel text when it was used), Jev's per-question answers, the verdict, and chat/message IDs. Sender IDs are not stored. This **does** persist message and profile text, so enable it only where that is acceptable. Rows older than `TRAINING_CAPTURE_DAYS` (default 30) and beyond 200,000 rows are pruned hourly; under load writes are dropped rather than queued, and failures never affect moderation. Remove the variable to stop capturing; `DELETE FROM training_samples` erases what was kept.
+`TRAINING_CAPTURE=true` stores every successful classifier classification in the `training_samples` table so a self-hosted model can be distilled from the cloud model: the exact request sent to the classifier (current message text, recent same-sender messages, reply previews, and the sender's bio/personal-channel text when it was used), the model's per-question answers, the verdict, and chat/message IDs. Sender IDs are not stored. This **does** persist message and profile text, so enable it only where that is acceptable. Rows older than `TRAINING_CAPTURE_DAYS` (default 30) and beyond 200,000 rows are pruned hourly; under load writes are dropped rather than queued, and failures never affect moderation. Remove the variable to stop capturing; `DELETE FROM training_samples` erases what was kept.
 
-To switch the primary classifier to a self-hosted server, set `JEV_URL` to its `/v1/systemone` URL, `TYPESAFE_API_KEY` to its bearer key and `JEV_MODEL` to the model name it reports (the spam cache only seeds verdicts from the configured model), then retune `SPAM_THRESHOLD` from the comparison.
+To switch the primary classifier to another GLM model, set `ZAI_MODEL` to its slug (the spam cache only seeds verdicts from the configured model). The approved policy pin applies only while the configured model equals the approved one; otherwise set your own `SPAM_THRESHOLD` and retune from shadow comparisons.
 
 ## Docker
 
@@ -93,24 +93,18 @@ docker build -t jev-antispam-bot .
 docker run --rm --env-file .env jev-antispam-bot
 ```
 
-## Optional PostgreSQL statistics
+## Statistics and audit outbox (embedded DuckDB)
 
-Create a PostgreSQL database and set `DATABASE_URL` to its connection URL:
-
-```sh
-DATABASE_URL=postgresql://jev_antispam:<password>@localhost:5432/jev_antispam
-```
-
-The database user needs permission to connect, create tables in its schema, and read/write those tables. Keep the database private and use persistent storage in production.
-
-The bot applies [`migrations/001_chat_stats.sql`](migrations/001_chat_stats.sql) automatically on the first queued batch. The migration is idempotent, so no separate migration command is required. After the bot receives a normal update, a `stats_storage_ready` log confirms that storage is available. You can inspect the totals with:
+Statistics, the verdict cache and the deletion-audit outbox all live in one embedded DuckDB file (`DUCKDB_PATH`, default `./data/antispam.duckdb`). DuckDB is a **single-writer** embedded database: run exactly one bot instance per file. The bot applies [`migrations/duck/*.sql`](migrations/duck) automatically on first use; the migration is idempotent, so no separate migration command is required. After the bot receives a normal update, a `stats_storage_ready` log confirms that storage is available. You can inspect the totals with:
 
 ```sql
 SELECT COUNT(*) AS known_chats, COALESCE(SUM(successful_deletions), 0) AS successful_deletions
 FROM known_chats;
 ```
 
-To disable statistics, remove `DATABASE_URL` and restart the bot. Existing database data is left untouched.
+(e.g. `bun -e 'const {DuckDBInstance}=await import("@duckdb/node-api"); const c=await (await DuckDBInstance.create("./data/antispam.duckdb",{readOnly:true})).connect(); console.log(await (await c.run("SELECT ...")) ...')` — or stop the bot and open the file read-only with any DuckDB client.)
+
+Statistics are optional in the failure sense: storage problems never block moderation or Telegram deletion calls. To start fresh, stop the bot and delete the file; nothing else references it.
 
 ## License
 
