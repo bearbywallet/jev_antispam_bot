@@ -68,7 +68,20 @@ const imageLoader = async (fileId: string): Promise<string> => {
   return `data:${mime};base64,${btoa(binary)}`;
 };
 
-registerBotHandlers(bot, { classifier, visionClassifier, shadowClassifier, trainingCapture, deletionAudit, model: config.openRouterModel, visionModel: config.zaiModel, stats, spamCache, imageLoader, spamThreshold: config.spamThreshold });
+registerBotHandlers(bot, {
+  classifier,
+  visionClassifier,
+  shadowClassifier,
+  trainingCapture,
+  deletionAudit,
+  model: config.openRouterModel,
+  visionModel: config.zaiModel,
+  stats,
+  spamCache,
+  imageLoader,
+  spamThreshold: config.spamThreshold,
+  banSpammers: process.env.BAN_SPAMMERS !== "false",
+});
 
 // Identity screening: joins, renames, admin/support impersonation, promo profiles, spam avatars.
 // Text evidence -> Jev router (OpenRouter); image evidence -> GLM vision (Z.AI).

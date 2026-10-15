@@ -1683,21 +1683,27 @@ test("cache: unavailable store falls back to ordinary classifier with fail-open 
 
 test("cache: real grammY + parsed OpenRouter + DuckDB restart retains useful ad hit", async () => {
   const { DuckDbSpamCache } = await import("./spam-cache");
-  const url = process.env.DUCKDB_PATH || "/tmp/jev_bot_cache_test.duckdb";
+  const previous = process.env.DUCKDB_PATH;
+  const url = `/tmp/jev_bot_cache_test_${crypto.randomUUID()}.duckdb`;
   process.env.DUCKDB_PATH = url;
-  let calls = 0;
-  const classifier = new JevSpamClassifier("test", { model: "jev-1.13.0", threshold: .81, timeoutMs: 1000,
-    fetch: async () => { calls++; return Response.json(wrapOpenRouter({ answers: Object.fromEntries(Object.keys(SPAM_QUESTIONS).map(k => [k, { type: "noul", noul: .97 }])) })); } });
-  const text = "Synthetic advertising fixture " + crypto.randomUUID();
-  const cache = new DuckDbSpamCache({ timeoutMs: 1000, logger: { info: () => {} } });
-  const first = harness((m, r) => classifier.classify(m, r), undefined, cache);
-  await first.send({ text }); expect(calls).toBe(1); await cache.close(); await first.stats.stop();
-  const restart = new DuckDbSpamCache({ timeoutMs: 1000, logger: { info: () => {} } });
-  const next = harness((m, r) => classifier.classify(m, r), undefined, restart);
-  await next.send({ text, message_id: 900 }); await next.send({ text, message_id: 901 }, true);
-  expect(calls).toBe(1); expect(next.deletes()).toEqual([900, 901]);
-  expect(next.stats.health().pendingClassificationAttempts).toBe(0);
-  await next.stats.stop(); await restart.close();
+  try {
+    let calls = 0;
+    const classifier = new JevSpamClassifier("test", { model: "jev-1.13.0", threshold: .81, timeoutMs: 1000,
+      fetch: async () => { calls++; return Response.json(wrapOpenRouter({ answers: Object.fromEntries(Object.keys(SPAM_QUESTIONS).map(k => [k, { type: "noul", noul: .97 }])) })); } });
+    const text = "Synthetic advertising fixture " + crypto.randomUUID();
+    const cache = new DuckDbSpamCache({ timeoutMs: 1000, logger: { info: () => {} } });
+    const first = harness((m, r) => classifier.classify(m, r), undefined, cache);
+    await first.send({ text }); expect(calls).toBe(1); await cache.close(); await first.stats.stop();
+    const restart = new DuckDbSpamCache({ timeoutMs: 1000, logger: { info: () => {} } });
+    const next = harness((m, r) => classifier.classify(m, r), undefined, restart);
+    await next.send({ text, message_id: 900 }); await next.send({ text, message_id: 901 }, true);
+    expect(calls).toBe(1); expect(next.deletes()).toEqual([900, 901]);
+    expect(next.stats.health().pendingClassificationAttempts).toBe(0);
+    await next.stats.stop(); await restart.close();
+  } finally {
+    if (previous === undefined) delete process.env.DUCKDB_PATH;
+    else process.env.DUCKDB_PATH = previous;
+  }
 });
 
 // Mock HTTP only: prove delivered bot messages use the unchanged parser/model/gate.
@@ -1963,4 +1969,50 @@ test("audit persistence unavailable skips destructive action; confirmation failu
   expect(f.logs.some(x => x.event === "classification_failed")).toBe(false);
   expect(JSON.stringify(f.logs)).not.toContain("private DB failure");
   await h.stats.stop(); await f.stats.stop();
+});
+
+test("spammer who sends duplicate spam is banned with reason duplicate_spam", async () => {
+  const h = harness();
+  h.setAnswer(assessment(true));
+  const spamText = "@Tieaibot 涞码收小款";
+  await h.send({ text: spamText, message_id: 101 });
+  expect(h.deletes()).toEqual([101]);
+  expect(h.calls.some((c) => c.method === "banChatMember")).toBe(false);
+
+  // Second identical spam message triggers ban
+  await h.send({ text: spamText, message_id: 102 });
+  expect(h.deletes()).toEqual([101, 102]);
+  expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+  expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "duplicate_spam")).toBe(true);
+  await h.stats.stop();
+});
+
+test("spammer who sends multiple different spam messages is banned on strike 2", async () => {
+  const h = harness();
+  h.setAnswer(assessment(true));
+  await h.send({ text: "first unique spam offer with crypto", message_id: 201 });
+  expect(h.deletes()).toEqual([201]);
+  expect(h.calls.some((c) => c.method === "banChatMember")).toBe(false);
+
+  await h.send({ text: "second unique spam offer with telegram link", message_id: 202 });
+  expect(h.deletes()).toEqual([201, 202]);
+  expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+  expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "repeat_spam")).toBe(true);
+  await h.stats.stop();
+});
+
+test("user with provocative channel (casino or lottery) is banned immediately", async () => {
+  const h = harness();
+  h.setProfileMetadata({ id: user.id, type: "private", personal_chat: personalChannel });
+  h.setPersonalChannelMetadata({
+    id: personalChannel.id,
+    type: "channel",
+    title: "Казино 1WIN Официальный канал",
+    description: "Слоты, рулетка, розыгрыши денег",
+  });
+  await h.send({ text: "Hello everyone", message_id: 301 });
+  expect(h.deletes()).toEqual([301]);
+  expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+  expect(h.logs.some((l) => l.event === "provocative_channel_detected" && l.keyword === "казино")).toBe(true);
+  await h.stats.stop();
 });

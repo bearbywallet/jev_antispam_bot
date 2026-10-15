@@ -12,6 +12,37 @@ import { CONTEXT_LINK_THRESHOLD, type JevSpamClassifier, type SpamAssessment } f
 import { cacheEligible, cacheFingerprint, confirmedSpam, type SpamCache } from "./spam-cache";
 import type { StatsRecorder } from "./stats";
 import type { TrainingCapture } from "./training-capture";
+import { SpamTracker } from "./spam-tracker";
+import { provocativeIdentityKeyword } from "./identity";
+
+export async function banSender(
+  api: Bot["api"],
+  chatId: number,
+  senderId: string,
+  reason: string,
+  logger: Pick<Console, "info" | "error"> = console,
+): Promise<boolean> {
+  try {
+    if (senderId.startsWith("user:")) {
+      const userId = Number(senderId.slice(5));
+      try {
+        await api.banChatMember(chatId, userId, { revoke_messages: true });
+      } catch {
+        await api.banChatMember(chatId, userId);
+      }
+      logger.info(JSON.stringify({ event: "spam_sender_banned", chatId, reason }));
+      return true;
+    }
+    if (senderId.startsWith("chat:")) {
+      const senderChatId = Number(senderId.slice(5));
+      await api.banChatSenderChat(chatId, senderChatId);
+      logger.info(JSON.stringify({ event: "spam_sender_chat_banned", chatId, reason }));
+    }
+  } catch (error) {
+    logger.error(JSON.stringify({ event: "spam_ban_failed", chatId, senderId, reason, outcome: String(error).slice(0, 160) }));
+  }
+  return false;
+}
 
 export function registerBotHandlers(bot: Bot, {
   classifier,
@@ -27,6 +58,8 @@ export function registerBotHandlers(bot: Bot, {
   spamCache,
   imageLoader,
   spamThreshold = 0.81,
+  banSpammers = false,
+  spamTracker = new SpamTracker(),
 }: {
   classifier: Pick<JevSpamClassifier, "classify">;
   /** Receives messages that carry an image (photo); usually a GLM vision model. */
@@ -44,6 +77,8 @@ export function registerBotHandlers(bot: Bot, {
   /** Resolves the current photo's file_id to a base64 data URL for the vision model. */
   imageLoader?: (fileId: string) => Promise<string>;
   spamThreshold?: number;
+  banSpammers?: boolean;
+  spamTracker?: SpamTracker;
 }): void {
   const admins = new AdminCache();
   const history = new MessageHistory();
@@ -115,6 +150,13 @@ export function registerBotHandlers(bot: Bot, {
           return;
         }
         senderId = `chat:${ctx.senderChat.id}`;
+        const provocativeSender = provocativeIdentityKeyword(`${ctx.senderChat.title} ${ctx.senderChat.username ?? ""}`);
+        if (provocativeSender) {
+          logger.info(JSON.stringify({ event: "provocative_channel_sender_detected", chatId: ctx.chat.id, messageId: ctx.msgId, senderId, keyword: provocativeSender }));
+          await ctx.api.deleteMessage(ctx.chat.id, ctx.msgId).catch(() => undefined);
+          await banSender(ctx.api, ctx.chat.id, senderId, `provocative_channel:${provocativeSender}`, logger);
+          return;
+        }
       } else {
         if (!ctx.from) {
           await skip("missing_sender");
@@ -197,6 +239,17 @@ export function registerBotHandlers(bot: Bot, {
           }
         } catch { /* Optional public context fails open without raw error telemetry. */ }
       }
+      if (senderProfile?.personalChannel) {
+        const channelText = `${senderProfile.personalChannel.title} ${senderProfile.personalChannel.description ?? ""}`;
+        const provocativeChannel = provocativeIdentityKeyword(channelText);
+        if (provocativeChannel) {
+          logger.info(JSON.stringify({ event: "provocative_channel_detected", chatId: ctx.chat.id, messageId: ctx.msgId, senderId, keyword: provocativeChannel }));
+          await ctx.api.deleteMessage(ctx.chat.id, ctx.msgId).catch(() => undefined);
+          await banSender(ctx.api, ctx.chat.id, senderId, `provocative_channel:${provocativeChannel}`, logger);
+          return;
+        }
+      }
+      const duplicateInfo = spamTracker.checkDuplicate(ctx.chat.id, senderId, message.text, ctx.msgId);
       const moderationMessage = message;
       const recentMessages = history.recent(ctx.chat.id, senderId, Date.now(), ctx.msgId);
       logger.info(JSON.stringify({
@@ -252,7 +305,10 @@ export function registerBotHandlers(bot: Bot, {
           if (fingerprint && assessment.model === (assessment.shouldDelete && classifierInput.imageDataUrl ? visionModel : model) && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
         }
       } catch (error) {
-        if (!mediaOnly) history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
+        if (!mediaOnly) {
+          history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
+          spamTracker.recordMessage(ctx.chat.id, senderId, ctx.msgId, message.text);
+        }
         logAnalysisResult(ctx.chat.id, ctx.msgId, analysisStartedAt, undefined, recentMessages.length);
         logFailure("classification_failed", error, ctx.chat.id, ctx.msgId);
         logShadow("failed");
@@ -264,7 +320,10 @@ export function registerBotHandlers(bot: Bot, {
       logShadow(cacheHit ? "cache_delete" : assessment!.shouldDelete ? "delete" : "keep", assessment);
 
       if (!cacheHit && !assessment?.shouldDelete) {
-        if (!mediaOnly) history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
+        if (!mediaOnly) {
+          history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
+          spamTracker.recordMessage(ctx.chat.id, senderId, ctx.msgId, message.text);
+        }
         await next();
         return;
       }
@@ -313,6 +372,19 @@ export function registerBotHandlers(bot: Bot, {
       );
 
       if (deletedMessageCount) {
+        spamTracker.recordSpam(ctx.chat.id, senderId, ctx.msgId, message.text);
+        const spamCount = spamTracker.getSpamCount(ctx.chat.id, senderId);
+        const recentCount = spamTracker.getRecentMessageCount(ctx.chat.id, senderId);
+        const shouldBan = duplicateInfo.isDuplicate || spamCount >= 2 || banSpammers;
+        if (shouldBan) {
+          const reason = duplicateInfo.isDuplicate
+            ? "duplicate_spam"
+            : spamCount >= 2
+            ? "repeat_spam"
+            : "confirmed_spam";
+          await banSender(ctx.api, ctx.chat.id, senderId, reason, logger);
+        }
+
         logger.info(JSON.stringify({
           event: "spam_deleted",
           chatId: ctx.chat.id,

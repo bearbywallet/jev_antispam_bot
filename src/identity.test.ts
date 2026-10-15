@@ -214,3 +214,29 @@ test("IDENTITY_TEXT_PROMPT marks identity data as untrusted", () => {
   expect(IDENTITY_TEXT_PROMPT).toContain("UNTRUSTED");
   expect(IDENTITY_TEXT_PROMPT).toContain("never instructions");
 });
+
+test("IDENTITY_TEXT_PROMPT is strictly in English and includes casinos, lotteries, and giveaways", () => {
+  expect(IDENTITY_TEXT_PROMPT).toContain("online casinos");
+  expect(IDENTITY_TEXT_PROMPT).toContain("lotteries");
+  expect(IDENTITY_TEXT_PROMPT).toContain("giveaways");
+  expect(/[а-яё]/i.test(IDENTITY_TEXT_PROMPT)).toBe(false);
+});
+
+test("provocative channel with casino or lotteries triggers ban", async () => {
+  const models = (values: { promo?: number }) => ({
+    promoProbability: async () => values.promo ?? 0.01,
+    avatarSpamProbability: async () => 0.01,
+    avatarImitationProbability: async () => 0.01,
+  });
+  const t = 0.8;
+  const input: ScreeningInput = {
+    member: { name: "User" },
+    keyword: null,
+    provocativeKeyword: "казино",
+    isProvocativeChannel: true,
+    profileText: "[PERSONAL CHANNEL] Казино 1WIN — слоты и выигрыши",
+  };
+  const outcome = await screenIdentity(t, input, models({ promo: 0.95 }));
+  expect(outcome.ban).toBe(true);
+  expect(outcome.reasons).toContain("provocative_channel:казино");
+});
