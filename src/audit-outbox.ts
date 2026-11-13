@@ -16,7 +16,9 @@ export interface DeletionAudit {
 }
 type AuditApi = Pick<Api, "sendMessage">;
 type Options = { capacity?: number; retentionMs?: number; timeoutMs?: number; intentLeaseMs?: number;
-  sendLeaseMs?: number; pollMs?: number; paceMs?: number };
+  sendLeaseMs?: number; pollMs?: number; paceMs?: number;
+  /** Content-free failure telemetry: state and Telegram error code only. */
+  logger?: (line: string) => void };
 type Claimed = { id: string; sequence: number; report: string; lease_token: string; attempts: number; lease_until: Date };
 export const MAX_AUDIT_PARTS = 256;
 const DAY = 86_400_000;
@@ -45,7 +47,7 @@ export async function sendAuditReport(api: AuditApi, report: string, timeoutMs: 
 
 export class DuckDbDeletionAudit implements DeletionAudit {
   private readonly api: AuditApi;
-  private readonly limits: Required<Options>;
+  private readonly limits: Required<Omit<Options, "logger">>;
   private migration?: Promise<void>;
   private timer?: ReturnType<typeof setInterval>;
   private work?: Promise<void>;
@@ -53,6 +55,7 @@ export class DuckDbDeletionAudit implements DeletionAudit {
   private closePromise?: Promise<void>;
   private readonly counters = { prepared: 0, refused: 0, duplicate: 0, confirmed: 0, deleteFailed: 0,
     deleteUnknown: 0, sent: 0, sendUnknown: 0, retried: 0, terminal: 0, expired: 0, expiredUndelivered: 0, error: 0 };
+  private readonly log: (line: string) => void;
   constructor(api: AuditApi, options: Options = {}) {
     const timeoutMs = bounded(options.timeoutMs, 10_000, 10, 30_000);
     const sendLeaseMs = bounded(options.sendLeaseMs, 60_000, timeoutMs + 100, 120_000);
@@ -64,6 +67,7 @@ export class DuckDbDeletionAudit implements DeletionAudit {
       paceMs: bounded(options.paceMs, 3_100, 1, 60_000),
     };
     this.api = api;
+    this.log = options.logger ?? (() => {});
   }
   health() { return { ...this.counters }; }
   initialize(): Promise<void> {
@@ -184,8 +188,10 @@ export class DuckDbDeletionAudit implements DeletionAudit {
     if (!row) return;
     let state = "sent", delay = this.limits.paceMs;
     let receipt: number | null = null;
+    let errorCode: number | null = null;
     try { receipt = await sendAuditReport(this.api, row.report, this.limits.timeoutMs); }
     catch (error) {
+      errorCode = error instanceof GrammyError ? error.error_code : null;
             // Only an explicit Telegram rejection proves the request was not accepted.
       if (error instanceof GrammyError && error.error_code === 429) {
         const seconds = error.parameters.retry_after;
@@ -210,6 +216,8 @@ export class DuckDbDeletionAudit implements DeletionAudit {
         // Completion-based pacing is conservative and survives a 429/restart/second worker.
         await duckQuery("UPDATE deletion_audit_sink SET next_send_at=GREATEST(next_send_at,now()+$1::BIGINT*INTERVAL 1 MILLISECOND)", [this.limits.paceMs]);
         this.counters[state === "sent" ? "sent" : state === "pending" ? "retried" : state === "terminal" ? "terminal" : "sendUnknown"]++;
+        // Surface WHY a report never reached the sink; no report text, no chat identity.
+        if (state !== "sent") this.log(JSON.stringify({ event: "audit_send_failed", state, errorCode, attempt: Number(row.attempts) }));
       }
     } catch { this.counters.error++; }
   }

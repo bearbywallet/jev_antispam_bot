@@ -20,7 +20,7 @@ if (effectiveModel(config.openRouterModel) === APPROVED_MODEL && config.spamThre
 }
 const bot = new Bot(config.telegramBotToken);
 const drainHandlers = trackHandlers(bot);
-const deletionAudit = new DuckDbDeletionAudit(bot.api);
+const deletionAudit = new DuckDbDeletionAudit(bot.api, { logger: (line) => console.info(line) });
 await deletionAudit.initialize();
 deletionAudit.start();
 const auditHealthTimer = setInterval(() => {
