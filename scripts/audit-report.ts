@@ -51,10 +51,18 @@ async function main() {
 }
 try { await main(); }
 catch (error) {
+  const failedStep = (error as { step?: string } | null)?.step ?? step;
+  const code = error instanceof GrammyError ? error.error_code : undefined;
   console.error(JSON.stringify({
     event: "audit_integration_failed",
-    step: (error as { step?: string } | null)?.step ?? step,
-    ...(error instanceof GrammyError ? { errorCode: error.error_code } : {}),
+    step: failedStep,
+    ...(code === undefined ? {} : { errorCode: code }),
+    // Coarse, content-free classification of the failure.
+    reason: code === 401 ? "invalid_token"
+      : code === 403 ? "bot_removed_or_no_access"
+      : code === 400 && (failedStep === "getChatMember" || failedStep === "getChat") ? "chat_unresolvable_by_bot"
+      : code === 429 ? "rate_limited"
+      : "unexpected",
     errorName: error instanceof Error ? error.name : "unknown",
     action: "Check protected configuration, membership and outbox status; no receipt claimed",
   }));
