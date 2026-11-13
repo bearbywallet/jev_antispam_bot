@@ -2016,3 +2016,13 @@ test("user with provocative channel (casino or lottery) is banned immediately", 
   expect(h.logs.some((l) => l.event === "provocative_channel_detected" && l.keyword === "казино")).toBe(true);
   await h.stats.stop();
 });
+
+test("terse private-contact data offer is deleted and banned even when the model keeps it", async () => {
+  const h = harness();
+  h.setAnswer(assessment(false));
+  await h.send({ text: "去私信拿数据搞裙演  六栢一天  @KIRS150", message_id: 401 });
+  expect(h.deletes()).toEqual([401]);
+  expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+  expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "private_contact_bait")).toBe(true);
+  await h.stats.stop();
+});

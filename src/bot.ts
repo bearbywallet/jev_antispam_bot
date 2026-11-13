@@ -14,6 +14,7 @@ import type { StatsRecorder } from "./stats";
 import type { TrainingCapture } from "./training-capture";
 import { SpamTracker } from "./spam-tracker";
 import { provocativeIdentityKeyword } from "./identity";
+import { PRIVATE_CONTACT_BAIT, privateContactBait } from "./contact-bait";
 
 export async function banSender(
   api: Bot["api"],
@@ -316,9 +317,22 @@ export function registerBotHandlers(bot: Bot, {
         return;
       }
 
+      // Deterministic safety net: a pitch that sends readers to private messages
+      // to receive the payload (data, ad content, price list) is spam even when
+      // the model scores the terse wording below SPAM_THRESHOLD.
+      const contactBait = mediaOnly || !assessment || assessment.shouldDelete ? null : privateContactBait(message.text);
+      if (assessment && contactBait) {
+        assessment = {
+          ...assessment,
+          shouldDelete: true,
+          probability: 1,
+          strongestSignal: "direct_contact_solicitation",
+          signals: { ...assessment.signals, direct_contact_solicitation: 1 },
+        };
+      }
+
       if (assessment) logAnalysisResult(ctx.chat.id, ctx.msgId, analysisStartedAt, assessment, recentMessages.length);
       logShadow(cacheHit ? "cache_delete" : assessment!.shouldDelete ? "delete" : "keep", assessment);
-
       if (!cacheHit && !assessment?.shouldDelete) {
         if (!mediaOnly) {
           history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
@@ -375,9 +389,12 @@ export function registerBotHandlers(bot: Bot, {
         spamTracker.recordSpam(ctx.chat.id, senderId, ctx.msgId, message.text);
         const spamCount = spamTracker.getSpamCount(ctx.chat.id, senderId);
         const recentCount = spamTracker.getRecentMessageCount(ctx.chat.id, senderId);
-        const shouldBan = duplicateInfo.isDuplicate || spamCount >= 2 || banSpammers;
+        const shouldBan =
+          contactBait !== null || duplicateInfo.isDuplicate || spamCount >= 2 || banSpammers;
         if (shouldBan) {
-          const reason = duplicateInfo.isDuplicate
+          const reason = contactBait
+            ? PRIVATE_CONTACT_BAIT
+            : duplicateInfo.isDuplicate
             ? "duplicate_spam"
             : spamCount >= 2
             ? "repeat_spam"
