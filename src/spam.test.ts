@@ -150,19 +150,19 @@ describe("JevSpamClassifier", () => {
       model: "jev-1.13.0",
       temperature: 0,
       response_format: { type: "json_object" },
-      thinking: { type: "disabled" },
       messages: [
         { role: "system", content: systemContent(sentBody) },
         { role: "user", content: JSON.stringify({ message: { text: "hello", embeddedLinks: [], isForwarded: false }, recentMessages: [] }) },
       ],
     });
+    expect((sentBody as Record<string, unknown>).thinking).toBeUndefined();
     expect(systemContent(sentBody)).toContain("[unsolicited_promotion]");
   });
 
   test("vision: imageDataUrl becomes an image_url part; photoFileId/imageDataUrl never reach the state JSON", async () => {
     let sentBody: any;
     const classifier = new JevSpamClassifier("", {
-      model: "glm-4.5v", threshold: 0.81, timeoutMs: 1000,
+      model: "nvidia/nemotron-3.5-super-vl:free", threshold: 0.81, timeoutMs: 1000,
       fetch: async (_url, init) => {
         sentBody = JSON.parse(String(init?.body));
         return Response.json(envelope(response()));
@@ -176,7 +176,7 @@ describe("JevSpamClassifier", () => {
     expect(state.message.imageDataUrl).toBeUndefined();
     expect(state.message.photoFileId).toBeUndefined();
     expect(state.message.mediaOnly).toBe(true);
-    expect(sentBody.thinking).toEqual({ type: "disabled" });
+    expect(sentBody.thinking).toBeUndefined();
   });
 
   test("sends recent sender context to TypeSafe", async () => {
@@ -324,4 +324,166 @@ test("onExchange receives exactly the request sent and Jev's answers; URL is con
   expect(sent!.url).toBe("http://laya:8000/v1/chat/completions");
   expect(exchanges).toEqual([[sent!.body, response({ easy_money_bait: 0.95 }).answers, result]]);
   expect(result).toMatchObject({ shouldDelete: true, strongestSignal: "easy_money_bait" });
+});
+
+describe("strict spam signals and OpenRouter fallbacks", () => {
+  test("parses lottery_or_giveaway_promotion and airdrop_promotion and rejects missing answers", () => {
+    const lottery = parseAssessment(response({ lottery_or_giveaway_promotion: 0.92 }), 0.81);
+    expect(lottery.shouldDelete).toBe(true);
+    expect(lottery.strongestSignal).toBe("lottery_or_giveaway_promotion");
+
+    const airdrop = parseAssessment(response({ airdrop_promotion: 0.95 }), 0.81);
+    expect(airdrop.shouldDelete).toBe(true);
+    expect(airdrop.strongestSignal).toBe("airdrop_promotion");
+
+    const missing = response();
+    delete missing.answers.airdrop_promotion;
+    expect(() => parseAssessment(missing, 0.81)).toThrow("invalid airdrop_promotion answer");
+  });
+
+  test("parses markdown-fenced JSON responses from OpenRouter models", async () => {
+    const classifier = new JevSpamClassifier("or-key", {
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      threshold: 0.81,
+      timeoutMs: 1_000,
+      fetch: async () =>
+        Response.json({
+          model: "nvidia/nemotron-3.5-super-vl:free",
+          choices: [
+            {
+              message: {
+                role: "assistant",
+                content: "<think>checking</think>\n```json\n" + JSON.stringify(response({ airdrop_promotion: 0.93 })) + "\n```",
+              },
+            },
+          ],
+        }),
+    });
+    const result = await classifier.classify({ text: "Claim airdrop now", embeddedLinks: [], isForwarded: false });
+    expect(result.shouldDelete).toBe(true);
+    expect(result.strongestSignal).toBe("airdrop_promotion");
+  });
+
+  test("caps OpenRouter models array at 3 entries and fails over to openai/gpt-oss-20b on 429", async () => {
+    const sentBodies: any[] = [];
+    const classifier = new JevSpamClassifier("or-key", {
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      fallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+      threshold: 0.81,
+      timeoutMs: 1_000,
+      fetch: async (url, init) => {
+        expect(String(url)).toBe("https://openrouter.ai/api/v1/chat/completions");
+        const body = JSON.parse(String(init?.body));
+        sentBodies.push(body);
+        if (sentBodies.length === 1) {
+          return new Response(null, { status: 429 });
+        }
+        return Response.json(envelope(response({ easy_money_bait: 0.96 }), "openai/gpt-oss-20b"));
+      },
+    });
+
+    const result = await classifier.classify({ text: "Earn $500/day easily", embeddedLinks: [], isForwarded: false });
+    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies[0].models).toEqual([
+      "nvidia/nemotron-3.5-super-vl:free",
+      "openrouter/free",
+      "openai/gpt-oss-20b:free",
+    ]);
+    expect(sentBodies[0].models.length).toBeLessThanOrEqual(3);
+    expect(sentBodies[1].model).toBe("openai/gpt-oss-20b");
+    expect(sentBodies[1].models).toBeUndefined();
+    expect(result.shouldDelete).toBe(true);
+    expect(result.model).toBe("openai/gpt-oss-20b");
+  });
+
+  test("falls back across free models and gpt-oss-20b on malformed JSON and HTTP 400 response_format", async () => {
+    const sentBodies: any[] = [];
+    const classifier = new JevSpamClassifier("or-key", {
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      fallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+      threshold: 0.81,
+      timeoutMs: 1_000,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        sentBodies.push(body);
+        if (sentBodies.length === 1) {
+          // Primary returns malformed JSON; OpenRouter won't try batch[1..2] itself on HTTP 200.
+          return Response.json({
+            model: "nvidia/nemotron-3.5-super-vl:free",
+            choices: [{ message: { role: "assistant", content: "not json" } }],
+          });
+        }
+        if (sentBodies.length === 2) {
+          // Next batch rejects response_format with HTTP 400.
+          return new Response(null, { status: 400 });
+        }
+        return Response.json(envelope(response({ explicit_content_promotion: 0.98 }), "openai/gpt-oss-20b"));
+      },
+    });
+
+    const result = await classifier.classify({ text: "18+ leaks", embeddedLinks: [], isForwarded: false });
+    expect(sentBodies).toHaveLength(3);
+    expect(sentBodies[1].models).toEqual([
+      "openrouter/free",
+      "openai/gpt-oss-20b:free",
+      "openai/gpt-oss-20b",
+    ]);
+    expect(sentBodies[1].response_format).toEqual({ type: "json_object" });
+    expect(sentBodies[2].response_format).toBeUndefined();
+    expect(result.shouldDelete).toBe(true);
+    expect(result.model).toBe("openai/gpt-oss-20b");
+  });
+
+  test("vision requests exclude text-only gpt-oss-20b models and degrade to text-only if vision fails on captioned photo", async () => {
+    const sentBodies: any[] = [];
+    const classifier = new JevSpamClassifier("or-key", {
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      fallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+      threshold: 0.81,
+      timeoutMs: 1_000,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body));
+        sentBodies.push(body);
+        if (sentBodies.length === 1) {
+          return new Response(null, { status: 503 });
+        }
+        return Response.json(envelope(response({ lottery_or_giveaway_promotion: 0.94 }), "openai/gpt-oss-20b:free"));
+      },
+    });
+
+    const dataUrl = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+    const result = await classifier.classify({
+      text: "Join lottery giveaway now!",
+      embeddedLinks: [],
+      isForwarded: false,
+      imageDataUrl: dataUrl,
+    });
+    expect(sentBodies).toHaveLength(2);
+    expect(sentBodies[0].models).toEqual(["nvidia/nemotron-3.5-super-vl:free", "openrouter/free"]);
+    expect(Array.isArray(sentBodies[0].messages[1].content)).toBe(true);
+    expect(sentBodies[1].models).toEqual(["openai/gpt-oss-20b:free", "openai/gpt-oss-20b"]);
+    expect(typeof sentBodies[1].messages[1].content).toBe("string");
+    expect(result.shouldDelete).toBe(true);
+    expect(result.strongestSignal).toBe("lottery_or_giveaway_promotion");
+  });
+
+  test("uncaptioned photo WITH imageDataUrl deletes on strict visual signals (18+, lottery, airdrop, easy earn)", async () => {
+    const classifier = new JevSpamClassifier("or-key", {
+      model: "nvidia/nemotron-3.5-super-vl:free",
+      threshold: 0.81,
+      timeoutMs: 1_000,
+      fetch: async () =>
+        Response.json(envelope(response({ explicit_content_promotion: 0.95, media_profile_funnel: 0.02 }))),
+    });
+    const result = await classifier.classify({
+      text: "",
+      embeddedLinks: [],
+      isForwarded: false,
+      mediaOnly: true,
+      imageDataUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==",
+    });
+    expect(result.shouldDelete).toBe(true);
+    expect(result.strongestSignal).toBe("explicit_content_promotion");
+    expect(result.probability).toBe(0.95);
+  });
 });

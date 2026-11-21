@@ -1,4 +1,6 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS } from "./policy";
 import { JevSpamClassifier, CONTEXT_LINK_THRESHOLD, type CurrentModerationMessage, type ModerationMessage } from "./spam";
 import { heartFixtures, publicPostProfile, explicitHeartProfile } from "./fixtures/heart-profile";
 import { normalizedRecruitment, hiringRequest, unrelatedReply } from "./fixtures/recruitment-replies";
@@ -26,17 +28,21 @@ const cases: { id: string; message: CurrentModerationMessage; shouldDelete: bool
   { id: "mixed-history-invite", message: message(inviteCampaigns[0]!.text), recent: inviteCampaigns[0]!.recent, shouldDelete: true, suffix: [2, 100] },
   { id: "requested-media-same-profile", message: { ...sympathy(publicPostProfile, "Please send a heart sticker to confirm receipt."), text: "", mediaOnly: true }, shouldDelete: false },
 ];
-const live = process.env.RUN_LIVE_ZAI === "1" && process.env.ZAI_API_KEY ? test : test.skip;
+const live = process.env.RUN_LIVE_OPENROUTER === "1" && process.env.OPENROUTER_API_KEY ? test : test.skip;
 for (const fixture of cases) live("0.81 comparison: " + fixture.id, async () => {
   const recent = fixture.recent ?? [];
   let request: any;
   let response: any;
-  const classifier = new JevSpamClassifier(process.env.ZAI_API_KEY!, {
-    model: "glm-4.6v", threshold: 0.81, timeoutMs: 25_000,
+  const liveModel = process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL;
+  const classifier = new JevSpamClassifier(process.env.OPENROUTER_API_KEY!, {
+    model: liveModel,
+    fallbackModels: DEFAULT_FALLBACK_MODELS,
+    url: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+    threshold: 0.81, timeoutMs: 25_000,
     fetch: async (url, init) => { request = JSON.parse(String(init?.body)); const reply = await fetch(url, init); response = await reply.clone().json(); return reply; },
   });
   const result = await classifier.classify(JSON.parse(JSON.stringify(fixture.message)), recent);
-  const oldClassifier = new JevSpamClassifier("synthetic-replay", { model: "glm-4.6v", threshold: 0.9, timeoutMs: 1000, fetch: async () => Response.json(response) });
+  const oldClassifier = new JevSpamClassifier("synthetic-replay", { model: liveModel, threshold: 0.9, timeoutMs: 1000, fetch: async () => Response.json(response) });
   const oldResult = await oldClassifier.classify(fixture.message, recent);
   const selected = result.shouldDelete ? (fixture.message.mediaOnly ? [100] : deletionMessageIds(recent.map((m,i) => ({ ...m, messageId: i+1, receivedAt: 1 })), 100, result.contextProbabilities, CONTEXT_LINK_THRESHOLD)) : [];
   if (process.env.THRESHOLD_EVIDENCE_DIR) await Bun.write(process.env.THRESHOLD_EVIDENCE_DIR + "/" + fixture.id + ".json", JSON.stringify({ fixture: fixture.id, expectedDelete: fixture.shouldDelete, request, response, oldResult, result, selected }, null, 2));

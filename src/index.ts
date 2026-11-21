@@ -38,18 +38,19 @@ const classifier = new JevSpamClassifier(config.openRouterApiKey, {
   timeoutMs: config.classifierTimeoutMs,
   url: config.openRouterUrl,
 });
-// Photos carry the image to a vision-capable model (Z.AI GLM).
-const visionClassifier = new JevSpamClassifier(config.zaiApiKey, {
-  model: config.zaiModel,
+// Photos carry the image to a vision-capable model on OpenRouter (with free-model + gpt-oss-20b fallbacks).
+const visionClassifier = new JevSpamClassifier(config.openRouterApiKey, {
+  model: config.openRouterVisionModel,
+  fallbackModels: config.openRouterFallbackModels,
   threshold: config.spamThreshold,
   timeoutMs: config.classifierTimeoutMs,
-  url: config.zaiUrl,
+  url: config.openRouterUrl,
 });
-const shadowClassifier = config.shadow && new JevSpamClassifier(config.zaiApiKey, {
+const shadowClassifier = config.shadow && new JevSpamClassifier(config.openRouterApiKey, {
   model: config.shadow.model,
   threshold: config.spamThreshold,
   timeoutMs: config.shadow.timeoutMs,
-  url: config.zaiUrl,
+  url: config.openRouterUrl,
 });
 
 // Vision attachment: photos are fetched from the Bot API and passed as base64 data URLs.
@@ -75,7 +76,8 @@ registerBotHandlers(bot, {
   trainingCapture,
   deletionAudit,
   model: config.openRouterModel,
-  visionModel: config.zaiModel,
+  visionModel: config.openRouterVisionModel,
+  visionFallbackModels: config.openRouterFallbackModels,
   stats,
   spamCache,
   imageLoader,
@@ -84,12 +86,19 @@ registerBotHandlers(bot, {
 });
 
 // Identity screening: joins, renames, admin/support impersonation, promo profiles, spam avatars.
-// Text evidence -> Jev router (OpenRouter); image evidence -> GLM vision (Z.AI).
+// Uses OpenRouter vision/text model with free-model + gpt-oss-20b fallbacks.
 if (process.env.IDENTITY_SCREENING !== "false") {
   const admins = new AdminCache();
   const profiles = new SenderProfileCache();
-  const probability = (system: string, user: string, image?: string) => probabilityRequest(
-    fetch, config.zaiUrl, config.zaiApiKey, { model: config.zaiModel, system, user, ...(image ? { image } : {}) });
+  const probability = (system: string, user: string, image?: string, images?: string[]) => probabilityRequest(
+    fetch, config.openRouterUrl, config.openRouterApiKey, {
+      model: config.openRouterVisionModel,
+      fallbackModels: config.openRouterFallbackModels,
+      system,
+      user,
+      ...(image ? { image } : {}),
+      ...(images ? { images } : {}),
+    });
   registerIdentityScreening(bot, {
     admins,
     profiles,
@@ -99,8 +108,11 @@ if (process.env.IDENTITY_SCREENING !== "false") {
       promoProbability: (evidence) => probability(IDENTITY_TEXT_PROMPT, evidence),
       avatarSpamProbability: (dataUrl) => probability(AVATAR_SPAM_PROMPT, "Assess this profile photo.", dataUrl),
       avatarImitationProbability: (adminDataUrl, memberDataUrl) => probability(
-        AVATAR_COMPARE_PROMPT, "Which image is the admin's? Does the member impersonate them?", adminDataUrl) ?? probability(
-        AVATAR_COMPARE_PROMPT, "Second call", memberDataUrl),
+        AVATAR_COMPARE_PROMPT,
+        "First image is the admin, second image is the member. Does the member impersonate them?",
+        undefined,
+        [adminDataUrl, memberDataUrl],
+      ),
     },
     logger: console,
   });
@@ -131,7 +143,8 @@ process.once("SIGINT", () => void shutdown("SIGINT"));
 console.info(JSON.stringify({
   event: "bot_starting",
   model: config.openRouterModel,
-  visionModel: config.zaiModel,
+  visionModel: config.openRouterVisionModel,
+  fallbackModels: config.openRouterFallbackModels,
   threshold: config.spamThreshold,
   cachePolicyRevision: CACHE_POLICY_REVISION,
   approvedPromptSha256: effectiveModel(config.openRouterModel) === APPROVED_MODEL ? APPROVED_PROMPT_SHA256 : null,

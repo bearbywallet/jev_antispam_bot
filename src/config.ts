@@ -1,4 +1,6 @@
-import { effectiveModel } from "./policy";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS, DEFAULT_VISION_MODEL, effectiveModel } from "./policy";
+
 export type Config = {
   telegramBotToken: string;
   telegramApiBase: string;
@@ -6,10 +8,9 @@ export type Config = {
   openRouterApiKey: string;
   openRouterUrl: string;
   openRouterModel: string;
-  // Vision classifier: Z.AI GLM (photos).
-  zaiApiKey: string;
-  zaiUrl: string;
-  zaiModel: string;
+  // Vision & identity classifier on OpenRouter (replacing Z.AI).
+  openRouterVisionModel: string;
+  openRouterFallbackModels: string[];
   duckdbPath: string;
   spamThreshold: number;
   classifierTimeoutMs: number;
@@ -30,6 +31,22 @@ function numberFromEnv(name: string, fallback: number): number {
   return value;
 }
 
+function parseFallbackModels(raw: string | undefined): string[] {
+  const trimmed = raw?.trim();
+  if (!trimmed) return [...DEFAULT_FALLBACK_MODELS];
+  if (trimmed.toLowerCase() === "none") return [];
+  const seen = new Set<string>();
+  const models: string[] = [];
+  for (const part of trimmed.split(",")) {
+    const model = part.trim();
+    if (model && !seen.has(model)) {
+      seen.add(model);
+      models.push(model);
+    }
+  }
+  return models;
+}
+
 export function loadConfig(): Config {
   const spamThreshold = numberFromEnv("SPAM_THRESHOLD", 0.81);
   if (spamThreshold < 0.5 || spamThreshold > 1) {
@@ -46,12 +63,10 @@ export function loadConfig(): Config {
     // Bot API base: must match where the file_id was minted when fetching photos.
     telegramApiBase: process.env.TELEGRAM_API_BASE?.trim() || "https://api.telegram.org",
     openRouterApiKey: required("OPENROUTER_API_KEY"),
-    openRouterUrl: process.env.OPENROUTER_URL?.trim() || "https://openrouter.ai/api/v1",
-    openRouterModel: effectiveModel(process.env.OPENROUTER_MODEL?.trim() || "typesafe/jev-router"),
-    zaiApiKey: required("ZAI_API_KEY"),
-    // Z.AI OpenAI-compatible endpoint (coding plan subscription).
-    zaiUrl: process.env.ZAI_URL?.trim() || "https://api.z.ai/api/coding/paas/v4",
-    zaiModel: effectiveModel(process.env.ZAI_MODEL?.trim() || "glm-4.6v"),
+    openRouterUrl: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+    openRouterModel: effectiveModel(process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL),
+    openRouterVisionModel: effectiveModel(process.env.OPENROUTER_VISION_MODEL?.trim() || DEFAULT_VISION_MODEL),
+    openRouterFallbackModels: parseFallbackModels(process.env.OPENROUTER_FALLBACK_MODELS),
     duckdbPath: process.env.DUCKDB_PATH?.trim() || "./data/antispam.duckdb",
     spamThreshold,
     classifierTimeoutMs,

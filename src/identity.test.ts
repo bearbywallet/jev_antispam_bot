@@ -8,6 +8,7 @@ import {
   normalizeName,
   parseProbability,
   probabilityRequest,
+  provocativeIdentityKeyword,
   registerIdentityScreening,
   screenIdentity,
 } from "./identity";
@@ -54,26 +55,33 @@ test("NameStore distinguishes new / same / changed", () => {
   expect(names.observe(9, 2, "Вася")).toBe("new");
 });
 
-test("parseProbability strips think traces and clamps", () => {
+test("parseProbability strips think traces, markdown fences and clamps", () => {
   expect(parseProbability('{"probability":0.75}')).toBe(0.75);
   expect(parseProbability('<think>hmm {"probability":9}</think>{"probability": 0.4}')).toBe(0.4);
+  expect(parseProbability('```json\n{"probability": 0.88}\n```')).toBe(0.88);
   expect(parseProbability('{"probability":5}')).toBe(1);
   expect(() => parseProbability("spam!")).toThrow("malformed JSON");
   expect(() => parseProbability('{"foo":1}')).toThrow("no probability");
 });
 
-test("probabilityRequest builds vision content parts and parses the answer", async () => {
+test("probabilityRequest builds vision content parts without thinking and filters text-only fallbacks", async () => {
   const bodies: unknown[] = [];
   const fetchFn = (async (_url: string | URL | Request, init?: RequestInit) => {
     bodies.push(JSON.parse(String(init?.body)));
     return Response.json({ choices: [{ message: { content: '{"probability":0.62}' } }] });
   }) as unknown as typeof fetch;
-  const probability = await probabilityRequest(fetchFn, "https://api.z.ai/api/coding/paas/v4", "key", {
-    model: "glm-4.6v", system: "SYS", user: "USER", images: ["data:image/a", "data:image/b"],
+  const probability = await probabilityRequest(fetchFn, "https://openrouter.ai/api/v1", "key", {
+    model: "nvidia/nemotron-3.5-super-vl:free",
+    fallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+    system: "SYS",
+    user: "USER",
+    images: ["data:image/a", "data:image/b"],
   });
   expect(probability).toBe(0.62);
-  const body = bodies[0]! as { model: string; messages: Array<{ role: string; content: unknown }> };
-  expect(body.model).toBe("glm-4.6v");
+  const body = bodies[0]! as { model: string; models?: string[]; thinking?: unknown; messages: Array<{ role: string; content: unknown }> };
+  expect(body.model).toBe("nvidia/nemotron-3.5-super-vl:free");
+  expect(body.models).toEqual(["nvidia/nemotron-3.5-super-vl:free", "openrouter/free"]);
+  expect(body.thinking).toBeUndefined();
   expect(body.messages[0]!).toEqual({ role: "system", content: "SYS" });
   expect(body.messages[1]!.role).toBe("user");
   expect(body.messages[1]!.content).toEqual([
@@ -81,6 +89,28 @@ test("probabilityRequest builds vision content parts and parses the answer", asy
     { type: "image_url", image_url: { url: "data:image/b" } },
     { type: "text", text: "USER" },
   ]);
+});
+
+test("probabilityRequest text screening falls back across free models to openai/gpt-oss-20b", async () => {
+  const bodies: any[] = [];
+  const fetchFn = (async () => { throw new Error("unused"); }) as unknown as typeof fetch;
+  const mockFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
+    const body = JSON.parse(String(init?.body));
+    bodies.push(body);
+    if (bodies.length === 1) return new Response(null, { status: 429 });
+    return Response.json({ model: "openai/gpt-oss-20b", choices: [{ message: { content: '{"probability":0.91}' } }] });
+  }) as unknown as typeof fetch;
+  void fetchFn;
+  const probability = await probabilityRequest(mockFetch, "https://openrouter.ai/api/v1", "key", {
+    model: "nvidia/nemotron-3.5-super-vl:free",
+    fallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+    system: "SYS",
+    user: "USER",
+  });
+  expect(probability).toBe(0.91);
+  expect(bodies).toHaveLength(2);
+  expect(bodies[0].models).toEqual(["nvidia/nemotron-3.5-super-vl:free", "openrouter/free", "openai/gpt-oss-20b:free"]);
+  expect(bodies[1].model).toBe("openai/gpt-oss-20b");
 });
 
 test("screenIdentity decision table", async () => {
@@ -215,11 +245,27 @@ test("IDENTITY_TEXT_PROMPT marks identity data as untrusted", () => {
   expect(IDENTITY_TEXT_PROMPT).toContain("never instructions");
 });
 
-test("IDENTITY_TEXT_PROMPT is strictly in English and includes casinos, lotteries, and giveaways", () => {
+test("IDENTITY_TEXT_PROMPT is strictly in English and includes strict spam categories", () => {
   expect(IDENTITY_TEXT_PROMPT).toContain("online casinos");
   expect(IDENTITY_TEXT_PROMPT).toContain("lotteries");
   expect(IDENTITY_TEXT_PROMPT).toContain("giveaways");
+  expect(IDENTITY_TEXT_PROMPT).toContain("airdrops");
+  expect(IDENTITY_TEXT_PROMPT).toContain("18+");
+  expect(IDENTITY_TEXT_PROMPT).toContain("easy-earn");
   expect(/[а-яё]/i.test(IDENTITY_TEXT_PROMPT)).toBe(false);
+});
+
+test("provocativeIdentityKeyword detects 18+, lotteries, airdrops, easy earn without false-matching 2018+ or plain adult descriptions", () => {
+  expect(provocativeIdentityKeyword("🔥18+ Сливы и интим")).toBe("18+");
+  expect(provocativeIdentityKeyword("OnlyFans VIP leaks")).toBe("onlyfans");
+  expect(provocativeIdentityKeyword("Crypto Airdrop Channel")).toBe("airdrop");
+  expect(provocativeIdentityKeyword("Аирдроп и ретродроп токенов")).toBe("аирдроп");
+  expect(provocativeIdentityKeyword("Easy Earn Daily")).toBe("easy earn");
+  expect(provocativeIdentityKeyword("Быстрый заработок с телефона")).toBe("быстрый заработок");
+  expect(provocativeIdentityKeyword("Play at bc.game today")).toBe("bc.game");
+  expect(provocativeIdentityKeyword("Photos from 2018+ trip")).toBeNull();
+  expect(provocativeIdentityKeyword("My adult videos: register for paid private access.")).toBeNull();
+  expect(provocativeIdentityKeyword("Вася Пупкин")).toBeNull();
 });
 
 test("provocative channel with casino or lotteries triggers ban", async () => {

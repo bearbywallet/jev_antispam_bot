@@ -219,12 +219,15 @@ for (const fixture of requestedAdminReplies) {
 
 test("confirmed invite campaign deletes only linked same-actor suffix, not unrelated history", async () => {
   const h = harness();
-  const fixture = inviteCampaigns[0]!;
-  for (const prior of fixture.recent) await h.send({ text: prior.text });
+  const recent = [
+    { text: "The library closes at six today.", embeddedLinks: [], isForwarded: false },
+    { text: `Check out our VIP trading desk membership: ${invite}`, embeddedLinks: [], isForwarded: false },
+  ];
+  for (const prior of recent) await h.send({ text: prior.text });
   h.setAnswer(assessment(true, [0.1, 0.97]));
-  await h.send({ text: fixture.text });
+  await h.send({ text: invite });
   expect(h.classifications[2]).toEqual({
-    message: withUnavailable({ text: fixture.text, embeddedLinks: [], isForwarded: false }), recent: fixture.recent.map(withUnavailable),
+    message: withUnavailable({ text: invite, embeddedLinks: [], isForwarded: false }), recent: recent.map(withUnavailable),
   });
   expect(h.deletes()).toEqual([2, 3]);
   await h.stats.stop();
@@ -1334,6 +1337,16 @@ test("sticker public-post context stays separate from uninspected media and repl
   expect(h.deletes()).toEqual([]); await h.stats.stop();
 });
 
+function withHistoricalDefaults(raw: { model: string; answers: Record<string, { type: string; noul: number }> }) {
+  return {
+    ...raw,
+    answers: {
+      ...Object.fromEntries(Object.keys(SPAM_QUESTIONS).map((key) => [key, { type: "noul", noul: 0.01 }])),
+      ...raw.answers,
+    },
+  };
+}
+
 // Historical pre-#21968 response: retained scores, NOT current-policy model evidence.
 for (const threshold of [0.9, 0.81]) for (const edited of [false, true]) {
   test("historical celebration response through handler gate=" + threshold + " edited=" + edited, async () => {
@@ -1342,7 +1355,7 @@ for (const threshold of [0.9, 0.81]) for (const edited of [false, true]) {
       fetch: async (_url, init) => {
         // Old answers prove only historical score routing, not current-prompt acceptance.
         expect(JSON.parse((JSON.parse(String(init?.body)).messages[1].content)).message).toEqual(evidence.request.state.message);
-        return Response.json(wrapOpenRouter(evidence.response));
+        return Response.json(wrapOpenRouter(withHistoricalDefaults(evidence.response)));
       },
     });
     const h = harness((message, recent) => classifier.classify(message, recent), async () => ({ status: 200, headers: { "content-type": "text/html" },
@@ -1366,7 +1379,7 @@ for (const id of ["spontaneous-celebration-post", "spontaneous-sympathy-post", "
       const input = evidence.request.state.message as CurrentModerationMessage;
       const requests: unknown[] = [];
       const classifier = new JevSpamClassifier("synthetic-replay", { model: "jev-1.13.0", threshold: 0.81, timeoutMs: 1000,
-        fetch: async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json(wrapOpenRouter(evidence.response)); },
+        fetch: async (_url, init) => { requests.push(JSON.parse(String(init?.body))); return Response.json(wrapOpenRouter(withHistoricalDefaults(evidence.response))); },
       });
       const posts = input.senderProfile?.personalChannel?.posts ?? [];
       const escape = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll('"', "&quot;");
@@ -2025,4 +2038,83 @@ test("terse private-contact data offer is deleted and banned even when the model
   expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
   expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "private_contact_bait")).toBe(true);
   await h.stats.stop();
+});
+
+test("strict rules delete and ban 18+, lottery, airdrop, and easy-earn spam even when the model keeps it", async () => {
+  const cases = [
+    { id: 501, text: "18+ сливы и интим видео в закрытом канале @hot_leaks_bot", reason: "strict_18_plus" },
+    { id: 502, text: "Mega USDT giveaway & lottery! Join now to win $1000 https://t.me/+win100", reason: "strict_lottery" },
+    { id: 503, text: "New token airdrop! Connect your wallet to claim free tokens: https://claim.example", reason: "strict_airdrop" },
+    { id: 504, text: inviteCampaigns[0]!.recent[1]!.text, reason: "strict_easy_earn" },
+  ];
+  for (const item of cases) {
+    const h = harness();
+    h.setAnswer(assessment(false));
+    await h.send({ text: item.text, message_id: item.id });
+    expect(h.deletes()).toEqual([item.id]);
+    expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+    expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === item.reason)).toBe(true);
+    await h.stats.stop();
+  }
+});
+
+test("strict rules keep benign airdrop questions and scam warnings when model keeps them", async () => {
+  const h = harness();
+  h.setAnswer(assessment(false));
+  await h.send({ text: "Is there an official Bearby airdrop?", message_id: 601 });
+  await h.send({ text: "Warning: this airdrop link is a wallet drainer scam, do not connect your wallet!", message_id: 602 });
+  expect(h.deletes()).toEqual([]);
+  expect(h.calls.some((c) => c.method === "banChatMember")).toBe(false);
+  await h.stats.stop();
+});
+
+test("provocative channels with 18+, airdrop, or easy-earn keywords are banned immediately", async () => {
+  for (const [id, title, expectedKeyword] of [
+    [701, "18+ Сливы VIP", "18+"],
+    [702, "Airdrop Free Tokens", "airdrop"],
+    [703, "Easy Earn $500 Daily", "easy earn"],
+  ] as const) {
+    const h = harness();
+    h.setProfileMetadata({ id: user.id, type: "private", personal_chat: personalChannel });
+    h.setPersonalChannelMetadata({ id: personalChannel.id, type: "channel", title, description: "" });
+    await h.send({ text: "Hello", message_id: id });
+    expect(h.deletes()).toEqual([id]);
+    expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+    expect(h.logs.some((l) => l.event === "provocative_channel_detected" && l.keyword === expectedKeyword)).toBe(true);
+    await h.stats.stop();
+  }
+});
+
+test("vision fallback model (e.g. openai/gpt-oss-20b via openrouter/free) seeds spam cache", async () => {
+  const cache = memorySpamCache();
+  const bot = new Bot("123:local-test-only", { botInfo });
+  const logger = { info: () => {}, error: () => {} };
+  const stats = new AsyncStatsBuffer({ writeBatch: async () => {}, close: async () => {} }, { autoStart: false, logger });
+  bot.api.config.use(async (_prev, method) => {
+    if (method === "getChatMember") return { ok: true, result: { status: "member", user } } as never;
+    if (method === "getChat") return { ok: true, result: { id: user.id, type: "private" } } as never;
+    return { ok: true, result: true } as never;
+  });
+  registerBotHandlers(bot, {
+    model: "typesafe/jev-router",
+    visionModel: "nvidia/nemotron-3.5-super-vl:free",
+    visionFallbackModels: ["openrouter/free", "openai/gpt-oss-20b:free", "openai/gpt-oss-20b"],
+    stats,
+    logger,
+    spamCache: cache,
+    imageLoader: async () => "data:image/jpeg;base64,ZmFrZQ==",
+    classifier: { classify: async () => assessment(false) },
+    visionClassifier: { classify: async () => ({ ...assessment(true), model: "openai/gpt-oss-20b" }) },
+  });
+  const msg = {
+    message_id: 801,
+    date: 1,
+    chat: group,
+    from: user,
+    caption: "Check out this lottery giveaway photo",
+    photo: [{ file_id: "p1", file_unique_id: "p1", width: 100, height: 100 }],
+  } as Message;
+  await bot.handleUpdate({ update_id: 801, message: JSON.parse(JSON.stringify(msg)) } as Update);
+  expect(cache.keys.size).toBe(1);
+  await stats.stop();
 });

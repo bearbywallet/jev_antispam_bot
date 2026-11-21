@@ -1,5 +1,7 @@
 import { careControls, careInvitation, careRequest, careVariants, careWhitespaceVariants, laptopPreview, normalizedCare, photoCare, reportedCare, rvPreview } from "./fixtures/paid-care";
 import { deletionMessageIds } from "./history";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS } from "./policy";
 import { CONTEXT_LINK_THRESHOLD, JevSpamClassifier, type ModerationMessage } from "./spam";
 
 const laptop = normalizedCare(reportedCare, laptopPreview);
@@ -34,12 +36,15 @@ export async function evaluateCare(classifier: JevSpamClassifier, [name, message
 }
 
 if (import.meta.main) {
-  if (process.env.RUN_LIVE_ZAI !== "1" || !process.env.ZAI_API_KEY) {
-    console.error("Opt in with RUN_LIVE_ZAI=1 and an existing protected ZAI_API_KEY environment.");
+  if (process.env.RUN_LIVE_OPENROUTER !== "1" || !process.env.OPENROUTER_API_KEY) {
+    console.error("Opt in with RUN_LIVE_OPENROUTER=1 and an existing protected OPENROUTER_API_KEY environment.");
     process.exitCode = 1;
   } else {
-    const classifier = new JevSpamClassifier(process.env.ZAI_API_KEY, {
-      model: "jev-1.13.0", threshold: 0.9, timeoutMs: 10_000,
+    const classifier = new JevSpamClassifier(process.env.OPENROUTER_API_KEY, {
+      model: process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL,
+      fallbackModels: DEFAULT_FALLBACK_MODELS,
+      url: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+      threshold: 0.9, timeoutMs: 10_000,
     });
     // One sequential attempt per case. No Telegram calls, source logging or retries.
     for (const fixture of careEvaluationCases) {

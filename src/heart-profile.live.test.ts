@@ -1,14 +1,19 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS } from "./policy";
 import { JevSpamClassifier, CONTEXT_LINK_THRESHOLD, type ModerationMessage } from "./spam";
 import { heartFixtures } from "./fixtures/heart-profile";
 
-const key = process.env.ZAI_API_KEY;
-const liveTest = process.env.RUN_LIVE_ZAI === "1" && key ? test : test.skip;
+const key = process.env.OPENROUTER_API_KEY;
+const liveTest = process.env.RUN_LIVE_OPENROUTER === "1" && key ? test : test.skip;
 for (const fixture of heartFixtures) {
   liveTest("synthetic heart boundary: " + fixture.id, async () => {
     const exchanges: { request: { state: { message: unknown }; questions: Record<string, unknown> }; response: { answers: Record<string, unknown> } }[] = [];
     const classifier = new JevSpamClassifier(key!, {
-      model: "glm-4.6v", threshold: 0.81, timeoutMs: 25_000,
+      model: process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL,
+      fallbackModels: DEFAULT_FALLBACK_MODELS,
+      url: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+      threshold: 0.81, timeoutMs: 25_000,
       fetch: async (url, init) => {
         const request = JSON.parse(String(init?.body));
         const response = await fetch(url, init);

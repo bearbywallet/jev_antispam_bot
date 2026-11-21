@@ -1,6 +1,8 @@
 import { previewFixtures, type PreviewFixture } from "./fixtures/preview-amplification";
 import { deletionMessageIds } from "./history";
 import { toModerationMessage } from "./message";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS } from "./policy";
 import { CONTEXT_LINK_THRESHOLD, JevSpamClassifier } from "./spam";
 
 // Calls the production request builder and strict parser; no question/answer reconstruction.
@@ -17,12 +19,15 @@ export async function evaluatePreview(classifier: JevSpamClassifier, fixture: Pr
 }
 
 if (import.meta.main) {
-  if (process.env.RUN_LIVE_ZAI !== "1" || !process.env.ZAI_API_KEY) {
-    console.error("Opt in with RUN_LIVE_ZAI=1 and an existing protected ZAI_API_KEY environment.");
+  if (process.env.RUN_LIVE_OPENROUTER !== "1" || !process.env.OPENROUTER_API_KEY) {
+    console.error("Opt in with RUN_LIVE_OPENROUTER=1 and an existing protected OPENROUTER_API_KEY environment.");
     process.exitCode = 1;
   } else {
-    const classifier = new JevSpamClassifier(process.env.ZAI_API_KEY, {
-      model: "jev-1.13.0", threshold: 0.9, timeoutMs: 10_000,
+    const classifier = new JevSpamClassifier(process.env.OPENROUTER_API_KEY, {
+      model: process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL,
+      fallbackModels: DEFAULT_FALLBACK_MODELS,
+      url: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+      threshold: 0.9, timeoutMs: 10_000,
     });
     // Sequential, one attempt per synthetic fixture; no retries or Telegram writes.
     for (const fixture of previewFixtures) {

@@ -1,11 +1,16 @@
 import { expect, test } from "bun:test";
+import { DEFAULT_OPENROUTER_URL } from "./openrouter";
+import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS } from "./policy";
 import { CONTEXT_LINK_THRESHOLD, JevSpamClassifier } from "./spam";
 import { reportedRecruitment, vagueRecruitmentControls, vagueRecruitmentVariants } from "./fixtures/vague-recruitment";
 
-const key = process.env.ZAI_API_KEY;
-const liveTest = process.env.RUN_LIVE_ZAI === "1" && key ? test : test.skip;
+const key = process.env.OPENROUTER_API_KEY;
+const liveTest = process.env.RUN_LIVE_OPENROUTER === "1" && key ? test : test.skip;
 const classifier = new JevSpamClassifier(key ?? "unused", {
-  model: "glm-4.6v", threshold: 0.9, timeoutMs: 25_000,
+  model: process.env.OPENROUTER_MODEL?.trim() || APPROVED_MODEL,
+  fallbackModels: DEFAULT_FALLBACK_MODELS,
+  url: process.env.OPENROUTER_URL?.trim() || DEFAULT_OPENROUTER_URL,
+  threshold: 0.9, timeoutMs: 25_000,
 });
 
 const positives = [

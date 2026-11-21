@@ -2,20 +2,37 @@ import { expect, test } from "bun:test";
 import { loadConfig } from "./config";
 
 test("loads required vars with documented defaults and clamps", () => {
-  const names = ["TELEGRAM_BOT_TOKEN", "OPENROUTER_API_KEY", "ZAI_API_KEY", "SPAM_THRESHOLD", "ZAI_MODEL", "OPENROUTER_MODEL", "CLASSIFIER_TIMEOUT_MS", "OPENROUTER_URL", "ZAI_URL", "TELEGRAM_API_BASE", "DUCKDB_PATH", "SHADOW_MODEL"] as const;
+  const names = [
+    "TELEGRAM_BOT_TOKEN",
+    "OPENROUTER_API_KEY",
+    "SPAM_THRESHOLD",
+    "OPENROUTER_MODEL",
+    "OPENROUTER_VISION_MODEL",
+    "OPENROUTER_FALLBACK_MODELS",
+    "CLASSIFIER_TIMEOUT_MS",
+    "OPENROUTER_URL",
+    "TELEGRAM_API_BASE",
+    "DUCKDB_PATH",
+    "SHADOW_MODEL",
+    "SHADOW_TIMEOUT_MS",
+  ] as const;
   const saved = Object.fromEntries(names.map((name) => [name, process.env[name]]));
   try {
     for (const name of names) delete process.env[name];
-    process.env.TELEGRAM_BOT_TOKEN = "synthetic"; process.env.OPENROUTER_API_KEY = "or-key"; process.env.ZAI_API_KEY = "zai-key";
+    process.env.TELEGRAM_BOT_TOKEN = "synthetic";
+    process.env.OPENROUTER_API_KEY = "or-key";
     expect(loadConfig()).toEqual({
       telegramBotToken: "synthetic",
       telegramApiBase: "https://api.telegram.org",
       openRouterApiKey: "or-key",
       openRouterUrl: "https://openrouter.ai/api/v1",
       openRouterModel: "typesafe/jev-router",
-      zaiApiKey: "zai-key",
-      zaiUrl: "https://api.z.ai/api/coding/paas/v4",
-      zaiModel: "glm-4.6v",
+      openRouterVisionModel: "nvidia/nemotron-3.5-super-vl:free",
+      openRouterFallbackModels: [
+        "openrouter/free",
+        "openai/gpt-oss-20b:free",
+        "openai/gpt-oss-20b",
+      ],
       duckdbPath: "./data/antispam.duckdb",
       spamThreshold: 0.81,
       classifierTimeoutMs: 15000,
@@ -30,16 +47,19 @@ test("loads required vars with documented defaults and clamps", () => {
     process.env.CLASSIFIER_TIMEOUT_MS = "30001"; expect(() => loadConfig()).toThrow("CLASSIFIER_TIMEOUT_MS");
     process.env.CLASSIFIER_TIMEOUT_MS = "12345.6"; expect(() => loadConfig()).toThrow("CLASSIFIER_TIMEOUT_MS");
     process.env.CLASSIFIER_TIMEOUT_MS = "20000"; expect(loadConfig().classifierTimeoutMs).toBe(20000);
-    process.env.ZAI_URL = "https://api.z.ai/api/paas/v4"; expect(loadConfig().zaiUrl).toBe("https://api.z.ai/api/paas/v4");
-    process.env.ZAI_MODEL = "glm-4.5v"; expect(loadConfig().zaiModel).toBe("glm-4.5v");
-    process.env.SHADOW_MODEL = "glm-4.6";
+    process.env.OPENROUTER_URL = "https://openrouter.example/v1";
+    expect(loadConfig().openRouterUrl).toBe("https://openrouter.example/v1");
+    process.env.OPENROUTER_VISION_MODEL = "nvidia/nemotron-3.5-super-vl";
+    expect(loadConfig().openRouterVisionModel).toBe("nvidia/nemotron-3.5-super-vl");
+    process.env.OPENROUTER_FALLBACK_MODELS = "openrouter/free, openai/gpt-oss-20b, openrouter/free";
+    expect(loadConfig().openRouterFallbackModels).toEqual(["openrouter/free", "openai/gpt-oss-20b"]);
+    process.env.OPENROUTER_FALLBACK_MODELS = "none";
+    expect(loadConfig().openRouterFallbackModels).toEqual([]);
+    process.env.SHADOW_MODEL = "openai/gpt-oss-20b";
     process.env.SHADOW_TIMEOUT_MS = "45000";
-    expect(loadConfig().shadow).toEqual({ model: "glm-4.6", timeoutMs: 45000 });
+    expect(loadConfig().shadow).toEqual({ model: "openai/gpt-oss-20b", timeoutMs: 45000 });
     delete process.env.SHADOW_MODEL;
     expect(loadConfig().shadow).toBeUndefined();
-    delete process.env.ZAI_API_KEY;
-    expect(() => loadConfig()).toThrow("ZAI_API_KEY");
-    process.env.ZAI_API_KEY = "zai-key";
     delete process.env.OPENROUTER_API_KEY;
     expect(() => loadConfig()).toThrow("OPENROUTER_API_KEY");
   } finally {

@@ -1,5 +1,11 @@
 import { expect, test } from "bun:test";
-import { APPROVED_MODEL, APPROVED_PROMPT_SHA256, effectiveModel } from "./policy";
+import {
+  APPROVED_MODEL,
+  APPROVED_PROMPT_SHA256,
+  DEFAULT_FALLBACK_MODELS,
+  DEFAULT_VISION_MODEL,
+  effectiveModel,
+} from "./policy";
 import { SPAM_QUESTIONS, systemPrompt } from "./spam";
 import { cacheFingerprint } from "./spam-cache";
 import { createHash } from "node:crypto";
@@ -10,8 +16,14 @@ test("prompt pin matches the rendered OpenRouter system prompt", () => {
   for (const key of Object.keys(SPAM_QUESTIONS)) expect(systemPrompt()).toContain(`[${key}]`);
 });
 
-test("approved classifier identity is pinned to the OpenRouter model", () => {
+test("approved classifier identity is pinned to the OpenRouter Jev model and OpenRouter vision fallbacks", () => {
   expect(APPROVED_MODEL).toBe("typesafe/jev-router");
+  expect(DEFAULT_VISION_MODEL).toBe("nvidia/nemotron-3.5-super-vl:free");
+  expect(DEFAULT_FALLBACK_MODELS).toEqual([
+    "openrouter/free",
+    "openai/gpt-oss-20b:free",
+    "openai/gpt-oss-20b",
+  ]);
   expect(effectiveModel("anything")).toBe("anything");
 });
 

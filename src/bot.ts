@@ -15,6 +15,7 @@ import type { TrainingCapture } from "./training-capture";
 import { SpamTracker } from "./spam-tracker";
 import { provocativeIdentityKeyword } from "./identity";
 import { PRIVATE_CONTACT_BAIT, privateContactBait } from "./contact-bait";
+import { strictRuleMatch } from "./strict-rules";
 
 export async function banSender(
   api: Bot["api"],
@@ -53,6 +54,7 @@ export function registerBotHandlers(bot: Bot, {
   deletionAudit,
   model,
   visionModel,
+  visionFallbackModels,
   stats,
   logger = console,
   previewRequest,
@@ -63,7 +65,7 @@ export function registerBotHandlers(bot: Bot, {
   spamTracker = new SpamTracker(),
 }: {
   classifier: Pick<JevSpamClassifier, "classify">;
-  /** Receives messages that carry an image (photo); usually a GLM vision model. */
+  /** Receives messages that carry an image (photo); routed via OpenRouter vision. */
   visionClassifier?: Pick<JevSpamClassifier, "classify">;
   shadowClassifier?: Pick<JevSpamClassifier, "classify">;
   trainingCapture?: TrainingCapture;
@@ -71,6 +73,8 @@ export function registerBotHandlers(bot: Bot, {
   model: string;
   /** Slug of the vision endpoint, for cache fingerprinting and logs. */
   visionModel?: string;
+  /** Fallback slugs configured for the vision classifier, for cache seeding. */
+  visionFallbackModels?: readonly string[];
   stats: StatsRecorder;
   logger?: Pick<Console, "info" | "error">;
   previewRequest?: PageRequest;
@@ -299,11 +303,21 @@ export function registerBotHandlers(bot: Bot, {
         if (!cacheHit) {
           stats.recordClassificationAttempt({ chatId: ctx.chat.id, messageId: ctx.msgId, updateId: ctx.update.update_id });
           const chatId = ctx.chat.id, messageId = ctx.msgId;
-          // Vision messages (photo attached) go to the GLM model; text to the Jev router.
-          const endpoint = classifierInput.imageDataUrl && visionClassifier ? visionClassifier : classifier;
+          // Vision messages (photo attached) go to the OpenRouter vision classifier; text to the Jev router.
+          const usedVision = Boolean(classifierInput.imageDataUrl && visionClassifier);
+          const endpoint = usedVision ? visionClassifier! : classifier;
           assessment = await endpoint.classify(classifierInput, context, trainingCapture
             && ((request, answers, result) => trainingCapture.record(chatId, messageId, request, answers, result)));
-          if (fingerprint && assessment.model === (assessment.shouldDelete && classifierInput.imageDataUrl ? visionModel : model) && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
+          const expectedModels = usedVision
+            ? [visionModel, ...(visionFallbackModels ?? [])].filter((m): m is string => Boolean(m))
+            : [model];
+          const matchesConfiguredModel = expectedModels.some(
+            (m) =>
+              m === "openrouter/free" ||
+              assessment!.model === m ||
+              assessment!.model === m.replace(/:free$/i, ""),
+          );
+          if (fingerprint && matchesConfiguredModel && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
         }
       } catch (error) {
         if (!mediaOnly) {
@@ -317,11 +331,30 @@ export function registerBotHandlers(bot: Bot, {
         return;
       }
 
-      // Deterministic safety net: a pitch that sends readers to private messages
-      // to receive the payload (data, ad content, price list) is spam even when
-      // the model scores the terse wording below SPAM_THRESHOLD.
-      const contactBait = mediaOnly || !assessment || assessment.shouldDelete ? null : privateContactBait(message.text);
-      if (assessment && contactBait) {
+      // Deterministic safety nets: strict zero-tolerance categories (18+,
+      // lotteries/giveaways, airdrops, easy-earn) and private-contact bait
+      // pitches upgrade soft keeps to confirmed deletion and ban.
+      const strictMatch =
+        mediaOnly || !assessment || assessment.shouldDelete
+          ? null
+          : strictRuleMatch({
+              text: message.text,
+              embeddedLinks: message.embeddedLinks,
+              inlineButtons: message.inlineButtons,
+            });
+      const contactBait =
+        mediaOnly || !assessment || assessment.shouldDelete || strictMatch
+          ? null
+          : privateContactBait(message.text);
+      if (assessment && strictMatch) {
+        assessment = {
+          ...assessment,
+          shouldDelete: true,
+          probability: 1,
+          strongestSignal: strictMatch.signal,
+          signals: { ...assessment.signals, [strictMatch.signal]: 1 },
+        };
+      } else if (assessment && contactBait) {
         assessment = {
           ...assessment,
           shouldDelete: true,
@@ -390,9 +423,11 @@ export function registerBotHandlers(bot: Bot, {
         const spamCount = spamTracker.getSpamCount(ctx.chat.id, senderId);
         const recentCount = spamTracker.getRecentMessageCount(ctx.chat.id, senderId);
         const shouldBan =
-          contactBait !== null || duplicateInfo.isDuplicate || spamCount >= 2 || banSpammers;
+          strictMatch !== null || contactBait !== null || duplicateInfo.isDuplicate || spamCount >= 2 || banSpammers;
         if (shouldBan) {
-          const reason = contactBait
+          const reason = strictMatch
+            ? strictMatch.reason
+            : contactBait
             ? PRIVATE_CONTACT_BAIT
             : duplicateInfo.isDuplicate
             ? "duplicate_spam"
