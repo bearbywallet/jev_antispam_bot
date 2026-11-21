@@ -177,6 +177,7 @@ describe("JevSpamClassifier", () => {
     expect(state.message.photoFileId).toBeUndefined();
     expect(state.message.mediaOnly).toBe(true);
     expect(sentBody.thinking).toBeUndefined();
+    expect(sentBody.reasoning).toEqual({ enabled: false });
   });
 
   test("sends recent sender context to TypeSafe", async () => {
@@ -390,8 +391,10 @@ describe("strict spam signals and OpenRouter fallbacks", () => {
       "openai/gpt-oss-20b:free",
     ]);
     expect(sentBodies[0].models.length).toBeLessThanOrEqual(3);
+    expect(sentBodies[0].reasoning).toEqual({ enabled: false });
     expect(sentBodies[1].model).toBe("openai/gpt-oss-20b");
     expect(sentBodies[1].models).toBeUndefined();
+    expect(sentBodies[1].reasoning).toEqual({ effort: "low", exclude: true });
     expect(result.shouldDelete).toBe(true);
     expect(result.model).toBe("openai/gpt-oss-20b");
   });
@@ -429,7 +432,9 @@ describe("strict spam signals and OpenRouter fallbacks", () => {
       "openai/gpt-oss-20b",
     ]);
     expect(sentBodies[1].response_format).toEqual({ type: "json_object" });
+    expect(sentBodies[1].reasoning).toEqual({ enabled: false });
     expect(sentBodies[2].response_format).toBeUndefined();
+    expect(sentBodies[2].reasoning).toEqual({ effort: "low", exclude: true });
     expect(result.shouldDelete).toBe(true);
     expect(result.model).toBe("openai/gpt-oss-20b");
   });

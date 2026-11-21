@@ -219,7 +219,7 @@ export async function probabilityRequest(
       ]
     : body.user;
 
-  return runOpenRouterFallback(candidates, async (batch, useJsonFormat) => {
+  return runOpenRouterFallback(candidates, async (batch, { useJsonFormat, reasoning }) => {
     let response: Response;
     try {
       response = await fetchFn(`${url}/chat/completions`, {
@@ -234,6 +234,7 @@ export async function probabilityRequest(
           ],
           temperature: 0,
           ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
+          ...(reasoning ? { reasoning } : {}),
         }),
         signal: AbortSignal.timeout(25_000),
       });

@@ -78,10 +78,11 @@ test("probabilityRequest builds vision content parts without thinking and filter
     images: ["data:image/a", "data:image/b"],
   });
   expect(probability).toBe(0.62);
-  const body = bodies[0]! as { model: string; models?: string[]; thinking?: unknown; messages: Array<{ role: string; content: unknown }> };
+  const body = bodies[0]! as { model: string; models?: string[]; thinking?: unknown; reasoning?: unknown; messages: Array<{ role: string; content: unknown }> };
   expect(body.model).toBe("nvidia/nemotron-3.5-super-vl:free");
   expect(body.models).toEqual(["nvidia/nemotron-3.5-super-vl:free", "openrouter/free"]);
   expect(body.thinking).toBeUndefined();
+  expect(body.reasoning).toEqual({ enabled: false });
   expect(body.messages[0]!).toEqual({ role: "system", content: "SYS" });
   expect(body.messages[1]!.role).toBe("user");
   expect(body.messages[1]!.content).toEqual([
@@ -110,7 +111,9 @@ test("probabilityRequest text screening falls back across free models to openai/
   expect(probability).toBe(0.91);
   expect(bodies).toHaveLength(2);
   expect(bodies[0].models).toEqual(["nvidia/nemotron-3.5-super-vl:free", "openrouter/free", "openai/gpt-oss-20b:free"]);
+  expect(bodies[0].reasoning).toEqual({ enabled: false });
   expect(bodies[1].model).toBe("openai/gpt-oss-20b");
+  expect(bodies[1].reasoning).toEqual({ effort: "low", exclude: true });
 });
 
 test("screenIdentity decision table", async () => {

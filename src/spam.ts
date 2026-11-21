@@ -477,7 +477,7 @@ export class JevSpamClassifier {
     const endpointUrl = `${this.options.url ?? DEFAULT_OPENROUTER_URL}/chat/completions`;
 
     const classifyWithCandidates = async (candidates: readonly string[], includeImage: boolean) =>
-      runOpenRouterFallback(candidates, async (batch, useJsonFormat) => {
+      runOpenRouterFallback(candidates, async (batch, { useJsonFormat, reasoning }) => {
         const attachImage = Boolean(includeImage && imageDataUrl);
         const request = {
           model: batch[0]!,
@@ -496,6 +496,7 @@ export class JevSpamClassifier {
           ],
           temperature: 0,
           ...(useJsonFormat ? { response_format: { type: "json_object" } } : {}),
+          ...(reasoning ? { reasoning } : {}),
         };
 
         let response: Response;
