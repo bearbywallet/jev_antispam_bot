@@ -544,7 +544,16 @@ export function registerIdentityScreening(bot: Bot, deps: IdentityScreeningDeps)
     threshold: deps.threshold,
     models: deps.models,
     names,
-    ban: async (userId) => { await bot.api.banChatMember(chatId, userId); },
+    // A plain ban leaves the member's posts in the chat. Revoke matches spam bans
+    // so a screened joiner's invite is removed with the account. If Telegram rejects
+    // the revoke, still ban; the caller records that failure.
+    ban: async (userId) => {
+      try {
+        await bot.api.banChatMember(chatId, userId, { revoke_messages: true });
+      } catch {
+        await bot.api.banChatMember(chatId, userId);
+      }
+    },
     report: async (text) => { await sendAuditReport(bot.api, text, deps.auditTimeoutMs ?? 10_000); },
     logger: deps.logger,
     ...(serviceMessageId !== undefined ? { serviceMessageId } : {}),

@@ -162,9 +162,11 @@ test("screenIdentity decision table", async () => {
 
 test("registerIdentityScreening: join with promo bio bans, reports and deletes service message", async () => {
   const methods: string[] = [];
+  const bans: Array<Record<string, unknown>> = [];
   const api = new Api("123:fixture");
   api.config.use(async (_prev: unknown, method: string, payload: unknown) => {
     methods.push(method);
+    if (method === "banChatMember") bans.push(payload as Record<string, unknown>);
     if (method === "getChatMember") return { status: "member", user: { id: 1 } } as never;
     if (method === "getChatAdministrators") return [{ status: "administrator", user: { id: 10, first_name: "Алексей", username: "chief" } }] as never;
     if (method === "getChat") return { id: -100, type: "private", bio: "🔥 crypto signals, paid VIP 🔥 t.me/buyvip" } as never;
@@ -202,19 +204,56 @@ test("registerIdentityScreening: join with promo bio bans, reports and deletes s
       new_chat_member: { status: "member", user: { id: 77, is_bot: false, first_name: "Support", username: "sup_promo" } },
     },
   } as never);
-  expect(methods).toContain("banChatMember");
+  expect(bans).toEqual([{ chat_id: -100500, user_id: 77, revoke_messages: true }]);
   expect(methods.filter((m) => m === "sendMessage")).toHaveLength(1); // audit report
   expect(promoEvidence[0]).toContain("[NAME] Support");
   expect(promoEvidence[0]).toContain("crypto signals");
 
-  // Basic-group join: service message deleted after the ban.
+  // Basic-group join: service message deleted after the ban, and the member's own posts are revoked.
   methods.length = 0;
   await handlers.get("message:new_chat_members")!({
     chat: { id: -100500 },
     msg: { message_id: 999, new_chat_members: [{ id: 88, is_bot: false, first_name: "helpdesk", username: "hd" }] },
   } as never);
-  expect(methods).toContain("banChatMember");
+  expect(bans[1]).toEqual({ chat_id: -100500, user_id: 88, revoke_messages: true });
   expect(methods).toContain("deleteMessage");
+
+  // Revoke rejected: the member is still banned, and the failure is the plain ban's.
+  const fallback: string[] = [];
+  const fallbackApi = new Api("123:fixture");
+  let revokeAttempts = 0;
+  fallbackApi.config.use(async (_prev: unknown, method: string) => {
+    fallback.push(method);
+    if (method === "banChatMember" && revokeAttempts++ === 0) throw new Error("revoke refused");
+    if (method === "getChatMember") return { status: "member", user: { id: 1 } } as never;
+    if (method === "getChatAdministrators") return [] as never;
+    if (method === "getUserProfilePhotos") return { total_count: 0, photos: [] } as never;
+    if (method === "sendMessage") return { message_id: 1, chat: { id: 1, type: "private" }, date: 1 } as never;
+    return { ok: true } as never;
+  });
+  const fallbackHandlers = new Map<string, (ctx: never) => Promise<void>>();
+  const fallbackBot = { api: fallbackApi, on: (trigger: string, handler: (ctx: never) => Promise<void>) => { fallbackHandlers.set(trigger, handler); } } as never;
+  registerIdentityScreening(fallbackBot, {
+    admins: { administrators: async () => [], isAdmin: async () => false } as never,
+    profiles: { get: async () => ({ bio: "paid VIP signals" }) } as never,
+    imageLoader: async () => { throw new Error("no photo"); },
+    threshold: 0.8,
+    models: {
+      promoProbability: async () => 0.95,
+      avatarSpamProbability: async () => 0.01,
+      avatarImitationProbability: async () => 0.01,
+    },
+    logger: { info: () => {}, error: () => {} },
+    auditTimeoutMs: 1000,
+  });
+  await fallbackHandlers.get("chat_member")!({
+    chat: { id: -100500 },
+    chatMember: {
+      old_chat_member: { status: "left" },
+      new_chat_member: { status: "member", user: { id: 99, is_bot: false, first_name: "Promo" } },
+    },
+  } as never);
+  expect(fallback.filter((method) => method === "banChatMember")).toHaveLength(2);
 
   // Admin joins: screened away without any API activity.
   methods.length = 0;
