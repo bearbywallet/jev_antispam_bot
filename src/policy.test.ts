@@ -16,9 +16,9 @@ test("prompt pin matches the rendered OpenRouter system prompt", () => {
   for (const key of Object.keys(SPAM_QUESTIONS)) expect(systemPrompt()).toContain(`[${key}]`);
 });
 
-test("approved classifier identity is pinned to the OpenRouter Jev model and OpenRouter vision fallbacks", () => {
-  expect(APPROVED_MODEL).toBe("typesafe/jev-router");
-  expect(DEFAULT_VISION_MODEL).toBe("nvidia/nemotron-3.5-super-vl:free");
+test("approved classifier identity is pinned to GLM 5.3 Flash for text and vision", () => {
+  expect(APPROVED_MODEL).toBe("z-ai/glm-5.3-flash");
+  expect(DEFAULT_VISION_MODEL).toBe("z-ai/glm-5.3-flash");
   expect(DEFAULT_FALLBACK_MODELS).toEqual([
     "openrouter/free",
     "openai/gpt-oss-20b:free",
@@ -33,8 +33,7 @@ test("cache identity still separates fingerprints per model", () => {
   expect(cacheFingerprint(raw, "user:1", input, 0, "model-a", .8, true)).not.toBe(cacheFingerprint(raw, "user:1", input, 0, "model-b", .8, true));
 });
 
-test("approved endpoint pin covers the routed slug, not the served engine", () => {
-  // typesafe/jev-router rotates underlying engines by design: the response's
-  // `model` field is informational, the pin covers the endpoint we call.
-  expect(APPROVED_MODEL).toBe("typesafe/jev-router");
+test("approved endpoint pin is the GLM slug OpenRouter serves back", () => {
+  // z-ai/glm-5.3-flash reports that same slug in the response `model` field.
+  expect(APPROVED_MODEL).toBe("z-ai/glm-5.3-flash");
 });

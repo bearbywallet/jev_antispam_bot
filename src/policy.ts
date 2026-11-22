@@ -1,10 +1,9 @@
 // Coupled with the approved classifiers; see README "Policy pin".
-// Text goes through the TypeSafe Jev router on OpenRouter; vision (photos) and
-// identity screening go through OpenRouter (`nvidia/nemotron-3.5-super-vl:free`)
-// with free-model (`openrouter/free`, `openai/gpt-oss-20b:free`) and
-// `openai/gpt-oss-20b` fallbacks.
-export const APPROVED_MODEL = "typesafe/jev-router";
-export const DEFAULT_VISION_MODEL = "nvidia/nemotron-3.5-super-vl:free";
+// Text, photos, and identity screening use Z.ai GLM 5.3 Flash on OpenRouter.
+// The Jev spam questionnaire is unchanged. Fallbacks are `openrouter/free`,
+// `openai/gpt-oss-20b:free`, and `openai/gpt-oss-20b`.
+export const APPROVED_MODEL = "z-ai/glm-5.3-flash";
+export const DEFAULT_VISION_MODEL = "z-ai/glm-5.3-flash";
 export const DEFAULT_FALLBACK_MODELS = [
   "openrouter/free",
   "openai/gpt-oss-20b:free",

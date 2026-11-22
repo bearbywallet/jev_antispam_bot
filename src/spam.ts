@@ -597,8 +597,7 @@ export class JevSpamClassifier {
     }
 
     let { assessment } = outcome;
-    // Router endpoints (APPROVED_MODEL is one) rotate underlying engines, so the
-    // served `model` field cannot be pinned; the pin covers the endpoint we call.
+    // The served `model` field is recorded for the cache. GLM reports its own slug.
     if (message.mediaOnly) {
       if (!outcome.imageAttached) {
         const probability = assessment.signals.media_profile_funnel;

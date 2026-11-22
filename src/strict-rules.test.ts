@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import {
   STRICT_18_PLUS,
   STRICT_AIRDROP,
+  STRICT_ARCHIVE_INVITE,
   STRICT_EASY_EARN,
   STRICT_LOTTERY,
   strictRuleMatch,
@@ -122,5 +123,27 @@ describe("strictRuleMatch", () => {
     for (const text of benignMessages) {
       expect(strictRuleMatch({ text })).toBeNull();
     }
+  });
+
+  test("deletes a bare invite whose landing page is a zip and mega dump", () => {
+    const landing = "🔥 Zips And Mega\nZipped archives and Mega links";
+    expect(strictRuleMatch({
+      text: "https://t.me/+VCIsBqKNIs45YTg5",
+      destinationText: landing,
+    })).toEqual({
+      reason: STRICT_ARCHIVE_INVITE,
+      signal: "unsolicited_telegram_invite_funnel",
+    });
+    expect(strictRuleMatch({
+      text: "Don't join this spam https://t.me/+VCIsBqKNIs45YTg5",
+      destinationText: landing,
+    })).toBeNull();
+    expect(strictRuleMatch({
+      text: "https://t.me/+VCIsBqKNIs45YTg5",
+      destinationText: "Study group for books",
+    })).toBeNull();
+    expect(strictRuleMatch({
+      text: "I zipped the archive and uploaded it to mega https://mega.nz/file/abc",
+    })).toBeNull();
   });
 });

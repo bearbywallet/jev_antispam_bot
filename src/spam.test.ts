@@ -180,6 +180,20 @@ describe("JevSpamClassifier", () => {
     expect(sentBody.reasoning).toEqual({ enabled: false });
   });
 
+  test("GLM Flash classification disables reasoning so the 15s budget is usable", async () => {
+    let sentBody: any;
+    const classifier = new JevSpamClassifier("", {
+      model: "z-ai/glm-5.3-flash", threshold: 0.81, timeoutMs: 1000,
+      fetch: async (_url, init) => {
+        sentBody = JSON.parse(String(init?.body));
+        return Response.json(envelope(response()));
+      },
+    });
+    await classifier.classify({ text: "hello", embeddedLinks: [], isForwarded: false });
+    expect(sentBody.model).toBe("z-ai/glm-5.3-flash");
+    expect(sentBody.reasoning).toEqual({ effort: "low", exclude: true });
+  });
+
   test("sends recent sender context to TypeSafe", async () => {
     let sentBody: any;
     const classifier = new JevSpamClassifier("test-key", {

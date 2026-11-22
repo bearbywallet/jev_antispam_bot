@@ -682,21 +682,30 @@ test("channel history isolates identities, synthetic from, human users, receivin
   await h.stats.stop();
 });
 
-test("classification failure keeps and remembers the channel message with one failed analysis", async () => {
+test("classification failure keeps a benign channel message and still deletes contact-bait copy", async () => {
+  const benign = "Saturday maintenance from 2pm to 3pm.";
   const h = harness();
   h.setClassifyError();
-  await h.send({ sender_chat: channel, from: synthetic, text: chinesePromotion });
+  await h.send({ sender_chat: channel, from: synthetic, text: benign });
   await h.send({ sender_chat: channel, from: synthetic, text: "follow-up" });
-  expect(h.classifications[1]?.recent[0]?.text).toBe(chinesePromotion);
+  expect(h.classifications[1]?.recent[0]?.text).toBe(benign);
   expect(h.logs.filter((log) => log.event === "message_analyzed")).toHaveLength(2);
   expect(h.logs.filter((log) => log.event === "message_analyzed").every((log) => log.status === "failed" && log.decision === "keep" && log.signals === null)).toBe(true);
   expect(h.skipped()).toEqual([]);
   expect(h.deletes()).toEqual([]);
-  expect(JSON.stringify(h.logs)).not.toContain(chinesePromotion);
+  expect(JSON.stringify(h.logs)).not.toContain(benign);
   expect(JSON.stringify(h.logs)).not.toContain("private model failure");
   await h.stats.stop();
   expect(h.batches[0]?.classificationAttempts.map(({ messageId, updateId }) =>
     [messageId, updateId])).toEqual([["1", "1"], ["2", "2"]]);
+
+  const spam = harness();
+  spam.setClassifyError();
+  await spam.send({ sender_chat: channel, from: synthetic, text: chinesePromotion });
+  expect(spam.deletes()).toEqual([1]);
+  expect(spam.logs.some((log) => log.event === "spam_sender_chat_banned" && log.reason === "private_contact_bait")).toBe(true);
+  expect(JSON.stringify(spam.logs)).not.toContain(chinesePromotion);
+  await spam.stats.stop();
 });
 
 test("linked deletes persist only successful group/message identities, never sender or content", async () => {
@@ -1982,6 +1991,36 @@ test("audit persistence unavailable skips destructive action; confirmation failu
   expect(f.logs.some(x => x.event === "classification_failed")).toBe(false);
   expect(JSON.stringify(f.logs)).not.toContain("private DB failure");
   await h.stats.stop(); await f.stats.stop();
+});
+
+const zipMegaPage = '<div class="tgme_page_title"><span>🔥 Zips And Mega</span></div><div class="tgme_page_description">Zipped archives and Mega links</div>';
+
+test("bare zip/mega invite is deleted and banned when the model keeps it", async () => {
+  const h = harness(undefined, async () => ({ status: 200, headers: { "content-type": "text/html" }, body: zipMegaPage }));
+  h.setAnswer(assessment(false));
+  await h.send({ text: "https://t.me/+VCIsBqKNIs45YTg5" });
+  expect(h.deletes()).toEqual([1]);
+  expect(h.calls.some((c) => c.method === "banChatMember" && c.payload.user_id === user.id)).toBe(true);
+  expect(h.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "strict_archive_invite")).toBe(true);
+  expect(h.logs.some((l) => l.event === "message_analyzed" && l.decision === "delete")).toBe(true);
+  await h.stats.stop();
+});
+
+test("model outage still deletes a strict archive invite and an easy-earn pitch", async () => {
+  const archive = harness(undefined, async () => ({ status: 200, headers: { "content-type": "text/html" }, body: zipMegaPage }));
+  archive.setClassifyError();
+  await archive.send({ text: "https://t.me/+VCIsBqKNIs45YTg5" });
+  expect(archive.deletes()).toEqual([1]);
+  expect(archive.logs.some((l) => l.event === "classification_failed")).toBe(true);
+  expect(archive.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "strict_archive_invite")).toBe(true);
+
+  const earn = harness();
+  earn.setClassifyError();
+  await earn.send({ text: "Earn guaranteed easy money every day! Join my earning group: https://t.me/+ExampleInvite" });
+  expect(earn.deletes()).toEqual([1]);
+  expect(earn.logs.some((l) => l.event === "spam_sender_banned" && l.reason === "strict_easy_earn")).toBe(true);
+  await archive.stats.stop();
+  await earn.stats.stop();
 });
 
 test("spammer who sends duplicate spam is banned with reason duplicate_spam", async () => {

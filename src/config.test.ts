@@ -26,8 +26,8 @@ test("loads required vars with documented defaults and clamps", () => {
       telegramApiBase: "https://api.telegram.org",
       openRouterApiKey: "or-key",
       openRouterUrl: "https://openrouter.ai/api/v1",
-      openRouterModel: "typesafe/jev-router",
-      openRouterVisionModel: "nvidia/nemotron-3.5-super-vl:free",
+      openRouterModel: "z-ai/glm-5.3-flash",
+      openRouterVisionModel: "z-ai/glm-5.3-flash",
       openRouterFallbackModels: [
         "openrouter/free",
         "openai/gpt-oss-20b:free",

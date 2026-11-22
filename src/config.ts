@@ -4,7 +4,7 @@ import { APPROVED_MODEL, DEFAULT_FALLBACK_MODELS, DEFAULT_VISION_MODEL, effectiv
 export type Config = {
   telegramBotToken: string;
   telegramApiBase: string;
-  // Text classifier: TypeSafe Jev router on OpenRouter.
+  // Text classifier: Z.ai GLM 5.3 Flash on OpenRouter. The Jev questionnaire is unchanged.
   openRouterApiKey: string;
   openRouterUrl: string;
   openRouterModel: string;

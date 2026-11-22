@@ -7,6 +7,7 @@ import type { SpamSignal } from "./spam";
  *   2. Lotteries, raffles, giveaways, and gambling promotions
  *   3. Crypto airdrops, retrodrops, and token-claim lures
  *   4. Easy-earn / fast-money / passive-income lures
+ *   5. Telegram invites whose public landing page is a zip/mega archive dump
  *
  * Each rule requires BOTH a category match AND a promotional/offer/CTA or
  * destination signal, and explicitly exempts scam warnings, moderator reports,
@@ -17,12 +18,14 @@ export const STRICT_18_PLUS = "strict_18_plus" as const;
 export const STRICT_LOTTERY = "strict_lottery" as const;
 export const STRICT_AIRDROP = "strict_airdrop" as const;
 export const STRICT_EASY_EARN = "strict_easy_earn" as const;
+export const STRICT_ARCHIVE_INVITE = "strict_archive_invite" as const;
 
 export type StrictRuleReason =
   | typeof STRICT_18_PLUS
   | typeof STRICT_LOTTERY
   | typeof STRICT_AIRDROP
-  | typeof STRICT_EASY_EARN;
+  | typeof STRICT_EASY_EARN
+  | typeof STRICT_ARCHIVE_INVITE;
 
 export type StrictRuleMatch = {
   reason: StrictRuleReason;
@@ -157,17 +160,29 @@ const EASY_EARN_OFFER_PATTERN = new RegExp(
   "iu",
 );
 
+const TELEGRAM_INVITE_PATTERN = /(?:https?:\/\/)?t\.me\/(?:\+|joinchat\/|[A-Za-z0-9_]{4,})/i;
+
+// Zip/mega dump channels advertise themselves on the public landing page
+// ("Zips And Mega" / "Zipped archives and Mega links") while the group message
+// is only the invite URL. Both words are required so a lone "archive" or
+// "mega" mention is not enough.
+function archiveDump(text: string): boolean {
+  return /\b(?:zip(?:ped|s)?|archives?)\b/i.test(text) && /\bmega(?:\.nz)?\b/i.test(text);
+}
+
 export function strictRuleMatch(input: {
   text?: string;
   embeddedLinks?: readonly string[];
   inlineButtons?: readonly { text: string; url: string }[];
+  /** Public title and description of a t.me landing page the current message links to. */
+  destinationText?: string;
 }): StrictRuleMatch | null {
   const rawText = (input.text ?? "").trim();
   const buttonLabels = (input.inlineButtons ?? []).map((b) => b.text).join(" ").trim();
   const combined = [rawText, buttonLabels].filter(Boolean).join(" ").trim();
-  if (!combined) return null;
+  if (!combined && !(input.destinationText ?? "").trim()) return null;
 
-  if (EXEMPTION_PATTERNS.some((pattern) => pattern.test(combined))) {
+  if (combined && EXEMPTION_PATTERNS.some((pattern) => pattern.test(combined))) {
     return null;
   }
 
@@ -207,6 +222,12 @@ export function strictRuleMatch(input: {
     (hasDestination || hasCta || EASY_EARN_OFFER_PATTERN.test(combined))
   ) {
     return { reason: STRICT_EASY_EARN, signal: "easy_money_bait" };
+  }
+
+  const inviteInMessage = TELEGRAM_INVITE_PATTERN.test([rawText, ...(input.embeddedLinks ?? [])].join(" "));
+  const landing = (input.destinationText ?? "").trim();
+  if (inviteInMessage && landing && archiveDump(landing)) {
+    return { reason: STRICT_ARCHIVE_INVITE, signal: "unsolicited_telegram_invite_funnel" };
   }
 
   return null;

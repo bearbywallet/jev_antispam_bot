@@ -32,13 +32,14 @@ export function isTextOnlyModel(model: string): boolean {
 /**
  * Configures OpenRouter reasoning controls so free/reasoning models do not
  * exhaust classification timeouts in multi-thousand-token thinking traces,
- * while leaving pinned/self-hosted models like typesafe/jev-router untouched.
+ * while leaving pinned/self-hosted models untouched.
  */
 export function openRouterReasoning(batch: readonly string[]): OpenRouterReasoning | undefined {
   const primary = batch[0]?.trim() ?? "";
   if (!primary) return undefined;
-  if (isTextOnlyModel(primary)) {
-    // gpt-oss models treat reasoning as mandatory on OpenRouter and reject enabled: false.
+  if (isTextOnlyModel(primary) || /^z-ai\/glm-/i.test(primary)) {
+    // gpt-oss and GLM Flash reject enabled:false. Keep a short trace and
+    // strip it from the assistant content so the JSON answer stays parseable.
     return { effort: "low", exclude: true };
   }
   if (

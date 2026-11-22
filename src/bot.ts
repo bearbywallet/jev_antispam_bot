@@ -8,7 +8,7 @@ import { toModerationMessage } from "./message";
 import { EnrichmentBudget, TelegramPreviewCache, type PageRequest } from "./telegram-preview";
 import { SenderProfileCache, personalChannelLocator } from "./profile";
 import { publicChannelUrl } from "./personal-posts";
-import { CONTEXT_LINK_THRESHOLD, type JevSpamClassifier, type SpamAssessment } from "./spam";
+import { CONTEXT_LINK_THRESHOLD, SPAM_QUESTIONS, type JevSpamClassifier, type SpamAssessment, type SpamSignal } from "./spam";
 import { cacheEligible, cacheFingerprint, confirmedSpam, type SpamCache } from "./spam-cache";
 import type { StatsRecorder } from "./stats";
 import type { TrainingCapture } from "./training-capture";
@@ -16,6 +16,28 @@ import { SpamTracker } from "./spam-tracker";
 import { provocativeIdentityKeyword } from "./identity";
 import { PRIVATE_CONTACT_BAIT, privateContactBait } from "./contact-bait";
 import { strictRuleMatch } from "./strict-rules";
+
+function forcedAssessment(signal: SpamSignal, modelName: string): SpamAssessment {
+  const signals = Object.fromEntries(
+    (Object.keys(SPAM_QUESTIONS) as SpamSignal[]).map((key) => [key, key === signal ? 1 : 0]),
+  ) as SpamAssessment["signals"];
+  return {
+    shouldDelete: true,
+    strongestSignal: signal,
+    probability: 1,
+    signals,
+    contextProbabilities: [],
+    model: modelName,
+  };
+}
+
+function destinationEvidence(previews: { status: string; title?: string; description?: string }[] | undefined): string {
+  return (previews ?? [])
+    .filter((preview) => preview.status === "available")
+    .flatMap((preview) => [preview.title, preview.description])
+    .filter((part): part is string => Boolean(part))
+    .join("\n");
+}
 
 export async function banSender(
   api: Bot["api"],
@@ -303,14 +325,14 @@ export function registerBotHandlers(bot: Bot, {
         if (!cacheHit) {
           stats.recordClassificationAttempt({ chatId: ctx.chat.id, messageId: ctx.msgId, updateId: ctx.update.update_id });
           const chatId = ctx.chat.id, messageId = ctx.msgId;
-          // Vision messages (photo attached) go to the OpenRouter vision classifier; text to the Jev router.
+          // Photos go to the vision model. Text uses the same GLM questionnaire without an image.
           const usedVision = Boolean(classifierInput.imageDataUrl && visionClassifier);
           const endpoint = usedVision ? visionClassifier! : classifier;
           assessment = await endpoint.classify(classifierInput, context, trainingCapture
             && ((request, answers, result) => trainingCapture.record(chatId, messageId, request, answers, result)));
-          const expectedModels = usedVision
-            ? [visionModel, ...(visionFallbackModels ?? [])].filter((m): m is string => Boolean(m))
-            : [model];
+          const expectedModels = (usedVision
+            ? [visionModel, ...(visionFallbackModels ?? [])]
+            : [model, ...(visionFallbackModels ?? [])]).filter((m): m is string => Boolean(m));
           const matchesConfiguredModel = expectedModels.some(
             (m) =>
               m === "openrouter/free" ||
@@ -320,33 +342,39 @@ export function registerBotHandlers(bot: Bot, {
           if (fingerprint && matchesConfiguredModel && confirmedSpam(assessment, spamThreshold)) await spamCache!.seed(fingerprint);
         }
       } catch (error) {
-        if (!mediaOnly) {
-          history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
-          spamTracker.recordMessage(ctx.chat.id, senderId, ctx.msgId, message.text);
-        }
-        logAnalysisResult(ctx.chat.id, ctx.msgId, analysisStartedAt, undefined, recentMessages.length);
         logFailure("classification_failed", error, ctx.chat.id, ctx.msgId);
-        logShadow("failed");
-        await next();
-        return;
       }
 
-      // Deterministic safety nets: strict zero-tolerance categories (18+,
-      // lotteries/giveaways, airdrops, easy-earn) and private-contact bait
-      // pitches upgrade soft keeps to confirmed deletion and ban.
+      // Deterministic safety nets still run when the model keeps a message or
+      // the call fails. A model outage must not keep a zip/mega dump invite.
       const strictMatch =
-        mediaOnly || !assessment || assessment.shouldDelete
+        mediaOnly || cacheHit || assessment?.shouldDelete
           ? null
           : strictRuleMatch({
               text: message.text,
               embeddedLinks: message.embeddedLinks,
               inlineButtons: message.inlineButtons,
+              destinationText: destinationEvidence(message.destinationPreviews),
             });
       const contactBait =
-        mediaOnly || !assessment || assessment.shouldDelete || strictMatch
+        mediaOnly || cacheHit || assessment?.shouldDelete || strictMatch
           ? null
           : privateContactBait(message.text);
-      if (assessment && strictMatch) {
+      if (!cacheHit && !assessment && !strictMatch && !contactBait) {
+        if (!mediaOnly) {
+          history.remember(ctx.chat.id, senderId, { ...message, messageId: ctx.msgId, receivedAt: Date.now(), auditSnapshot: snapshot });
+          spamTracker.recordMessage(ctx.chat.id, senderId, ctx.msgId, message.text);
+        }
+        logAnalysisResult(ctx.chat.id, ctx.msgId, analysisStartedAt, undefined, recentMessages.length);
+        logShadow("failed");
+        await next();
+        return;
+      }
+      if (!assessment && strictMatch) {
+        assessment = forcedAssessment(strictMatch.signal, model);
+      } else if (!assessment && contactBait) {
+        assessment = forcedAssessment("direct_contact_solicitation", model);
+      } else if (assessment && strictMatch) {
         assessment = {
           ...assessment,
           shouldDelete: true,

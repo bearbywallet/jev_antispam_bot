@@ -34,6 +34,7 @@ const trainingCapture = process.env.TRAINING_CAPTURE === "true"
   ? new DuckDbTrainingCapture({ retentionDays: Number(process.env.TRAINING_CAPTURE_DAYS || 30) }) : undefined;
 const classifier = new JevSpamClassifier(config.openRouterApiKey, {
   model: config.openRouterModel,
+  fallbackModels: config.openRouterFallbackModels,
   threshold: config.spamThreshold,
   timeoutMs: config.classifierTimeoutMs,
   url: config.openRouterUrl,
